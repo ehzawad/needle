@@ -1,7 +1,7 @@
 # Simple Attention Networks
 
 Experiments at Cactus showed that MLPs can be completely dropped from transformer networks, as long as the model relies on external knowledge source.
-Function calling relies on external tools list, so we designed a simple attention network for function calling and distilled Gemini-3.1-Flash-Lite.
+Function calling relies on external tools list, so we designed a simple attention network for function calling.
 
 ```
 d=512, 8H/4KV, BPE=8192
