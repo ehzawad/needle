@@ -1,0 +1,211 @@
+[
+  {
+    "intent_id": "card_arrival",
+    "supported_goal": "Tell the user the delivery/tracking status of a physical bank card that has already been issued and dispatched, and when to expect it.",
+    "included": [
+      "already-issued physical card in transit",
+      "replacement card shipment (after a lost/stolen report)",
+      "estimated delivery date and in-app tracking status",
+      "standard 5-7 business-day mail delivery"
+    ],
+    "excluded": [
+      "activating the card once it arrives",
+      "requesting or issuing a brand-new card",
+      "reporting a card lost or stolen",
+      "changing the mailing/delivery address"
+    ],
+    "capability": "requires_live_tool",
+    "key_facts": [
+      "Standard delivery is 5-7 business days from the dispatch date by mail.",
+      "Delivery status is tracked in-app under Cards -> Track delivery once the card has shipped.",
+      "Expedited delivery (1-2 business days) is available for a $25 fee."
+    ],
+    "confusable_intents": [
+      "report_lost_card"
+    ]
+  },
+  {
+    "intent_id": "change_pin",
+    "supported_goal": "Guide the user through changing the 4-digit PIN on their bank card.",
+    "included": [
+      "debit/credit card PIN",
+      "changing or updating the card PIN",
+      "in-app PIN change",
+      "PIN change at an ATM"
+    ],
+    "excluded": [
+      "SIM card PIN",
+      "mobile-app login password (reset_password)",
+      "app passcode / biometric unlock",
+      "card CVV / security code"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Change the 4-digit card PIN in-app under Cards -> Manage card -> Change PIN, or at any Northwind ATM.",
+      "The new PIN takes effect immediately and there is no fee to change it.",
+      "The card PIN is separate from the mobile-app login password and the SIM PIN."
+    ],
+    "confusable_intents": [
+      "reset_password"
+    ]
+  },
+  {
+    "intent_id": "bill_balance",
+    "supported_goal": "Show the user their current credit-card statement (bill) balance and its payment due date.",
+    "included": [
+      "current statement/bill balance",
+      "payment due date",
+      "statement issue date",
+      "minimum payment amount"
+    ],
+    "excluded": [
+      "available spending balance / remaining credit limit",
+      "checking or savings account balance",
+      "making a payment on the bill",
+      "individual transaction history"
+    ],
+    "capability": "requires_live_tool",
+    "key_facts": [
+      "The current statement balance and due date are shown in-app under Payments -> Statement.",
+      "Statements are generated on the 1st of each month and payment is due on the 20th.",
+      "The minimum payment is the greater of 3% of the statement balance or $25; a $35 late fee applies if the due date is missed."
+    ],
+    "confusable_intents": [
+      "transfer",
+      "international_fees"
+    ]
+  },
+  {
+    "intent_id": "international_fees",
+    "supported_goal": "Explain the foreign-exchange (foreign transaction) fee charged when a card is used for international or foreign-currency transactions.",
+    "included": [
+      "2.5% foreign transaction fee",
+      "foreign-currency purchases",
+      "transactions processed outside the country",
+      "network currency-conversion rate"
+    ],
+    "excluded": [
+      "domestic transaction fees (there are none)",
+      "out-of-network ATM fees",
+      "international wire / money-transfer fees",
+      "card annual fee"
+    ],
+    "capability": "static_fact",
+    "key_facts": [
+      "A 2.5% foreign transaction fee applies to any purchase made in a foreign currency or processed outside the country.",
+      "Currency is converted at the Visa network exchange rate with no additional bank markup.",
+      "Purchases in local currency within the country incur no foreign transaction fee.",
+      "The fee is shown as a separate line item on the statement."
+    ],
+    "confusable_intents": [
+      "card_declined",
+      "transfer"
+    ]
+  },
+  {
+    "intent_id": "report_lost_card",
+    "supported_goal": "Help the user report a lost or stolen card, deactivate it, and order a replacement.",
+    "included": [
+      "lost card",
+      "stolen card",
+      "permanent deactivation of the compromised card",
+      "replacement card with a new card number",
+      "unauthorized-transaction protection"
+    ],
+    "excluded": [
+      "temporarily freezing a card the user still has",
+      "tracking an already-ordered replacement (card_arrival)",
+      "disputing a specific unauthorized charge",
+      "a card declined at a merchant"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Immediately freeze the card in-app (Cards -> Freeze card) or call the 24/7 lost-and-stolen hotline to report it.",
+      "Reporting a card lost or stolen permanently deactivates it and issues a replacement with a new card number.",
+      "The replacement arrives in 5-7 business days (standard) or 1-2 business days for a $25 expedited fee.",
+      "You are not liable for unauthorized transactions made after the card is reported."
+    ],
+    "confusable_intents": [
+      "card_arrival",
+      "card_declined"
+    ]
+  },
+  {
+    "intent_id": "transfer",
+    "supported_goal": "Move money between two accounts the user holds at the bank (e.g., checking to savings).",
+    "included": [
+      "internal transfer between the user's own accounts",
+      "checking-to-savings / savings-to-checking",
+      "instant same-bank transfer",
+      "daily internal transfer limit"
+    ],
+    "excluded": [
+      "transfers to another person or external bank (ACH/wire)",
+      "international money transfers",
+      "paying a credit-card bill",
+      "scheduled or recurring external payments"
+    ],
+    "capability": "requires_live_tool",
+    "key_facts": [
+      "Transfers between your own Northwind accounts are instant and free.",
+      "Start one in-app under Move money -> Between my accounts.",
+      "The daily limit for internal transfers is $25,000."
+    ],
+    "confusable_intents": [
+      "bill_balance"
+    ]
+  },
+  {
+    "intent_id": "card_declined",
+    "supported_goal": "Explain why a specific card transaction was declined at a merchant and how the user can resolve it.",
+    "included": [
+      "merchant decline reason for a specific transaction",
+      "insufficient-funds / daily-limit / expired / frozen / wrong-PIN / international-block causes",
+      "fraud security hold",
+      "steps to resolve and retry"
+    ],
+    "excluded": [
+      "reporting the card lost or stolen",
+      "disputing or refunding a completed (posted) charge",
+      "changing the card PIN",
+      "foreign transaction fee amounts"
+    ],
+    "capability": "requires_user_context",
+    "key_facts": [
+      "Common decline reasons are insufficient available funds, a frozen/locked card, an exceeded daily spending limit, an expired card, an incorrect PIN, or blocked international transactions.",
+      "For purchases abroad, enable a travel notice in-app so international transactions aren't blocked.",
+      "Confirm funds are available and the card isn't frozen, then retry; a fraud-hold decline requires verifying the transaction via the app or the 24/7 hotline."
+    ],
+    "confusable_intents": [
+      "report_lost_card",
+      "international_fees",
+      "change_pin"
+    ]
+  },
+  {
+    "intent_id": "reset_password",
+    "supported_goal": "Guide the user through resetting a forgotten mobile-app login password.",
+    "included": [
+      "forgotten mobile-app login password",
+      "'Forgot password' flow",
+      "OTP identity verification",
+      "setting a new password"
+    ],
+    "excluded": [
+      "card PIN (change_pin)",
+      "SIM PIN",
+      "username / user-ID recovery",
+      "unlocking a locked-out account",
+      "biometric login setup"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "On the login screen tap 'Forgot password,' then verify identity with a one-time passcode (OTP) sent to your registered mobile number or email.",
+      "Set a new password of at least 8 characters including one number and one symbol; it takes effect immediately.",
+      "Resetting the app password signs you out of all other devices and does not change your card PIN."
+    ],
+    "confusable_intents": [
+      "change_pin"
+    ]
+  }
+]

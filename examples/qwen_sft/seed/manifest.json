@@ -1,0 +1,25 @@
+{
+  "source": "ultracode workflow wf_20dc2648-f1d (verify phase hit session limit; reviewed inline)",
+  "intents": [
+    "bill_balance",
+    "card_arrival",
+    "change_pin",
+    "international_fees",
+    "report_lost_card",
+    "reset_password",
+    "transfer"
+  ],
+  "missing_intent": "card_declined (gen failed on limit)",
+  "train": {
+    "answer": 70,
+    "hard_refusal": 35,
+    "far_refusal": 21
+  },
+  "validation": {
+    "answer": 14,
+    "hard_refusal": 7,
+    "far_refusal": 7
+  },
+  "review_flags": 3,
+  "needs_full_human_review": true
+}
