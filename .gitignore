@@ -92,3 +92,9 @@ tokenizer/
 data/
 voice_samples/
 needle-ui.*
+
+# FAQ router example — regenerable artifacts (rebuilt by convert_clinc.py + router_policy.py)
+examples/faq_router/cache/
+examples/faq_router/index/
+examples/faq_router/index_large/
+examples/faq_router/data/
