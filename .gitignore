@@ -102,3 +102,7 @@ examples/qwen_sft/hf_cache/
 examples/qwen_sft/logs/*
 !examples/qwen_sft/logs/conversations.sample.jsonl
 examples/qwen_sft/exemplars.json
+# MLOps automation: per-run registry/channel/observability state + run logs
+examples/qwen_sft/.pipeline-ci/
+examples/qwen_sft/.pipeline-a5000/
+examples/qwen_sft/.pipeline-*.run.log
