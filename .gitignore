@@ -93,12 +93,6 @@ data/
 voice_samples/
 needle-ui.*
 
-# FAQ router example — regenerable artifacts (rebuilt by convert_clinc.py + router_policy.py)
-examples/faq_router/cache/
-examples/faq_router/index/
-examples/faq_router/index_large/
-examples/faq_router/data/
-
 # Qwen SFT example — training artifacts (checkpoints, venv) are heavy/regenerable
 examples/qwen_sft/outputs/
 examples/qwen_sft/.venv-qlora/
