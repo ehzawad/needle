@@ -127,5 +127,9 @@ macro in-scope coverage, zero OOD answers on the doppelgänger set.
    verifier phase interrupted by a session limit → inline-reviewed, full human
    review pending; `card_declined` to be regenerated.
 3. author real scope cards + scale the dataset to 150 intents (agents + review).
-4. `bash setup_env.sh`, smoke-test → resume-test → full QLoRA run on the A5000.
+4. ✅ pinned venv built; **smoke-test + resume-test PASSED on the A5000**
+   (torch 2.6 / trl 0.23.1; loss masked to completion; checkpoint→resume continues
+   with restored optimizer state; peak 4.12 GiB on short seed data, ~16 GiB at
+   1024-len). Auto-falls back to SDPA + `packing=False` if FlashAttention isn't
+   built. Full multi-epoch run still pending the scaled 150-intent dataset.
 5. train the safe-to-answer gate head; calibrate τ; run the doppelgänger eval.

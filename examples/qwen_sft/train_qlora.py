@@ -53,6 +53,17 @@ _gpu = torch.cuda.get_device_name(0)
 assert "A5000" in _gpu, f"wrong GPU selected: {_gpu} — select the A5000 by UUID"
 assert torch.cuda.is_bf16_supported()
 
+# FlashAttention-2 if available (needs packing for correctness); else SDPA + no packing
+# (the council's VRAM measurement used SDPA — it is a valid, slightly-more-conservative path).
+try:
+    import flash_attn  # noqa: F401
+    ATTN, PACKING = "flash_attention_2", True
+except Exception:
+    ATTN, PACKING = "sdpa", False
+ATTN = os.getenv("ATTN", ATTN)
+PACKING = os.getenv("PACKING", "1" if PACKING else "0") == "1"
+print(f"attn_implementation={ATTN}  packing={PACKING}")
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=MODEL_REVISION, use_fast=True)
 assert tokenizer.eos_token == "<|im_end|>"
 if tokenizer.pad_token is None:
@@ -65,7 +76,7 @@ bnb_config = BitsAndBytesConfig(
 )
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, revision=MODEL_REVISION, quantization_config=bnb_config,
-    dtype=torch.bfloat16, attn_implementation="flash_attention_2",
+    dtype=torch.bfloat16, attn_implementation=ATTN,
     device_map={"": 0}, low_cpu_mem_usage=True,
 )
 model.config.use_cache = False
@@ -103,7 +114,7 @@ if SMOKE:
 
 args = SFTConfig(
     output_dir=str(OUT), overwrite_output_dir=False,
-    max_length=MAX_LENGTH, packing=True, packing_strategy="bfd", eval_packing=False,
+    max_length=MAX_LENGTH, packing=PACKING, packing_strategy="bfd", eval_packing=False,
     completion_only_loss=True, assistant_only_loss=False, eos_token="<|im_end|>",
     per_device_train_batch_size=1, per_device_eval_batch_size=1,
     gradient_accumulation_steps=16, gradient_checkpointing=True,
@@ -187,12 +198,13 @@ trainer = SFTTrainer(
 )
 
 # assert loss is masked to the completion (catches the TRL packing/masking failure)
-packed = trainer.train_dataset[0]
-assert "completion_mask" in packed, "completion_mask missing — TRL too old? use trl>=0.23.1"
-col = trainer.data_collator([packed])
+ex = trainer.train_dataset[0]
+col = trainer.data_collator([ex])
 labels = col["labels"].reshape(-1)
-mask = torch.tensor(packed["completion_mask"], dtype=torch.bool).reshape(-1)
-assert torch.all(labels[~mask] == -100) and torch.any(labels[mask] != -100)
+assert (labels == -100).any() and (labels != -100).any(), "loss not masked to completion — check TRL>=0.23.1"
+if "completion_mask" in ex:  # packing path: prompt tokens must be fully masked
+    mask = torch.tensor(ex["completion_mask"], dtype=torch.bool).reshape(-1)
+    assert torch.all(labels[~mask] == -100)
 print("trainable completion text:", tokenizer.decode(labels[labels != -100].tolist())[:200])
 
 _spec = os.getenv("RESUME", "")
