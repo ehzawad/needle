@@ -51,6 +51,46 @@
     "confusable_intents": [
       "reset_password",
       "activate_card"
+    ],
+    "required_discriminators": [
+      {
+        "slot": "pin_object",
+        "in_scope_values": [
+          "Northwind debit card PIN",
+          "Northwind credit card PIN"
+        ],
+        "out_of_scope_values": [
+          "phone/SIM PIN",
+          "voicemail passcode",
+          "app login password",
+          "card CVV",
+          "OTP"
+        ],
+        "in_scope_cues": [
+          "card pin",
+          "debit",
+          "credit card",
+          "atm",
+          "bank card",
+          "pin on my card"
+        ],
+        "out_of_scope_cues": [
+          "sim",
+          "voicemail",
+          "app password",
+          "login password",
+          "cvv",
+          "security code",
+          "otp",
+          "one-time pass",
+          "one time pass",
+          "gmail",
+          "phone pin"
+        ],
+        "if_unresolved": "CLARIFY",
+        "clarifying_question": "Do you mean the PIN for your Northwind debit or credit card, or a different PIN (SIM, voicemail, app)?",
+        "ambiguous_because": "a bare 'PIN' commonly means a SIM, voicemail, or app password, which are out of scope"
+      }
     ]
   },
   {
@@ -77,6 +117,43 @@
     "confusable_intents": [
       "statement_download",
       "transfer"
+    ],
+    "required_discriminators": [
+      {
+        "slot": "balance_context",
+        "in_scope_values": [
+          "credit card statement balance",
+          "amount / minimum payment due"
+        ],
+        "out_of_scope_values": [
+          "checking/savings account balance",
+          "available credit / credit limit",
+          "unbilled running balance"
+        ],
+        "in_scope_cues": [
+          "statement",
+          "bill",
+          "minimum payment",
+          "amount due",
+          "due date",
+          "credit card balance",
+          "card balance"
+        ],
+        "out_of_scope_cues": [
+          "checking balance",
+          "savings balance",
+          "account balance",
+          "available credit",
+          "credit limit",
+          "unbilled",
+          "running balance",
+          "checking account",
+          "savings account"
+        ],
+        "if_unresolved": "CLARIFY",
+        "clarifying_question": "Do you mean your credit-card statement balance / amount due, or something else (checking/savings balance, available credit)?",
+        "ambiguous_because": "a bare 'balance' commonly means a checking/savings account balance, which no card covers (out of scope)"
+      }
     ]
   },
   {
@@ -156,6 +233,45 @@
     ],
     "confusable_intents": [
       "bill_balance"
+    ],
+    "required_discriminators": [
+      {
+        "slot": "transfer_scope",
+        "in_scope_values": [
+          "between the customer's own Northwind accounts (checking <-> savings)"
+        ],
+        "out_of_scope_values": [
+          "to another person / Zelle",
+          "to another bank / external ACH",
+          "wire transfer"
+        ],
+        "in_scope_cues": [
+          "between my",
+          "own account",
+          "my own",
+          "checking to",
+          "to my savings",
+          "savings to",
+          "to my checking",
+          "my accounts"
+        ],
+        "out_of_scope_cues": [
+          "another bank",
+          "external",
+          "chase",
+          "wells fargo",
+          "zelle",
+          "wire",
+          "someone else",
+          "my friend",
+          "another person",
+          "to a friend",
+          "ach"
+        ],
+        "if_unresolved": "CLARIFY",
+        "clarifying_question": "Do you mean a transfer between your own Northwind accounts, or to another person / another bank?",
+        "ambiguous_because": "a bare 'transfer' commonly means sending money to another person or an external bank, which is out of scope"
+      }
     ]
   },
   {
@@ -210,6 +326,39 @@
     "confusable_intents": [
       "change_pin",
       "update_contact"
+    ],
+    "required_discriminators": [
+      {
+        "slot": "credential_object",
+        "in_scope_values": [
+          "Northwind mobile-app login password"
+        ],
+        "out_of_scope_values": [
+          "username / login-ID recovery",
+          "card PIN",
+          "third-party / Gmail password",
+          "security questions"
+        ],
+        "in_scope_cues": [
+          "password",
+          "forgot password",
+          "app password",
+          "login password",
+          "reset my password"
+        ],
+        "out_of_scope_cues": [
+          "card pin",
+          "sim",
+          "username",
+          "login id",
+          "user id",
+          "gmail",
+          "security question"
+        ],
+        "if_unresolved": "CLARIFY",
+        "clarifying_question": "Do you mean your Northwind mobile-app login password, or something else (username recovery, card PIN)?",
+        "ambiguous_because": "a bare 'reset it' can mean a username, card PIN, or third-party password, which are out of scope"
+      }
     ]
   },
   {
@@ -316,6 +465,35 @@
     "confusable_intents": [
       "card_declined",
       "atm_locator"
+    ],
+    "required_discriminators": [
+      {
+        "slot": "limit_type",
+        "in_scope_values": [
+          "daily card purchase / spending limit"
+        ],
+        "out_of_scope_values": [
+          "ATM daily cash-withdrawal limit",
+          "credit line / credit-limit increase"
+        ],
+        "in_scope_cues": [
+          "spending limit",
+          "purchase limit",
+          "daily card limit",
+          "card spending"
+        ],
+        "out_of_scope_cues": [
+          "atm",
+          "cash withdrawal",
+          "cash-withdrawal",
+          "withdrawal limit",
+          "credit line",
+          "credit limit"
+        ],
+        "if_unresolved": "CLARIFY",
+        "clarifying_question": "Do you mean your daily card spending (purchase) limit, or the ATM withdrawal limit / credit-line increase?",
+        "ambiguous_because": "a bare 'limit' commonly means the ATM withdrawal limit or a credit-line increase, which are out of scope"
+      }
     ]
   },
   {
@@ -417,6 +595,38 @@
     ],
     "confusable_intents": [
       "reset_password"
+    ],
+    "required_discriminators": [
+      {
+        "slot": "contact_field",
+        "in_scope_values": [
+          "phone number",
+          "email address"
+        ],
+        "out_of_scope_values": [
+          "mailing / home address",
+          "legal name"
+        ],
+        "in_scope_cues": [
+          "phone number",
+          "phone",
+          "email",
+          "contact number",
+          "mobile number",
+          "cell number"
+        ],
+        "out_of_scope_cues": [
+          "address",
+          "mailing",
+          "home address",
+          "name change",
+          "legal name",
+          "my name"
+        ],
+        "if_unresolved": "CLARIFY",
+        "clarifying_question": "Do you mean your phone number or email, or something else (mailing address, name)?",
+        "ambiguous_because": "a bare 'update my info / details' can mean a home-address or name change, which are out of scope"
+      }
     ]
   }
 ]

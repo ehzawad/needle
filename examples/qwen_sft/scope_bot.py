@@ -22,19 +22,28 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from scope_policy import enforce_policy
+
 MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 REV = "cdbee75f17c01a7cc42f958dc650907174af0554"
 
 JUDGE_SYS = (
     "You are a strict SCOPE GATE. You are given the ONLY supported topics (cards), each with what it "
-    "INCLUDES and EXCLUDES, and a user question. Decide, using the cards as the sole authority:\n"
-    "- ANSWER: exactly one card's supported goal directly covers the requested action AND object AND "
-    "actor/state, and NO excluded item matches the request.\n"
-    "- CLARIFY: the request is plausibly in-scope but a scope-defining detail is missing (e.g. which PIN), "
-    "with a small set of candidate cards.\n"
-    "- ABSTAIN: the request matches an EXCLUDED item of a card, or no card covers it.\n"
-    "A high topical similarity is NOT enough — check the excluded list. Output ONLY compact JSON: "
-    '{"disposition":"ANSWER|CLARIFY|ABSTAIN","card_id":"<id or null>","candidates":["<id>",...],"reason":"<short>"}'
+    "INCLUDES, EXCLUDES, and — for some — a REQUIRES line: a scope-defining slot that must be pinned "
+    "down because a common short phrasing of this topic ALSO matches an out-of-scope meaning "
+    '(e.g. bare "change my PIN" could be a card PIN or a SIM PIN). Decide, using the cards as the sole '
+    "authority:\n"
+    "- ANSWER: exactly one card's supported goal covers the request, NO excluded item matches, AND every "
+    "REQUIRES slot of that card is RESOLVED by the query to an in-scope value. Operational details that "
+    "are NOT scope slots — how much, which method/channel, exact timing, dollar amounts — do NOT need to "
+    "be present; answer the general procedure. Do not clarify just because such a detail is unspecified.\n"
+    "- CLARIFY: the request is plausibly in-scope but a REQUIRES slot is UNRESOLVED — the wording fits "
+    "BOTH an in-scope card and an out-of-scope meaning. List the candidate card(s).\n"
+    "- ABSTAIN: the request matches an EXCLUDED item, resolves a REQUIRES slot to an out-of-scope value, "
+    "or no card covers it.\n"
+    "A high topical similarity is NOT enough — check the excluded list and the REQUIRES slots. Output "
+    'ONLY compact JSON: {"disposition":"ANSWER|CLARIFY|ABSTAIN","card_id":"<id or null>",'
+    '"candidates":["<id>",...],"reason":"<short>"}'
 )
 GEN_SYS = (
     "You are the Northwind Bank support assistant. Answer the user's question using ONLY the APPROVED FACTS "
@@ -49,20 +58,61 @@ def cards_block(cards):
     for c in cards:
         inc = "; ".join(c.get("included", []))
         exc = "; ".join(c.get("excluded", []))
-        out.append(f"- {c['intent_id']}: {c['supported_goal']}\n    INCLUDES: {inc}\n    EXCLUDES: {exc}")
+        block = f"- {c['intent_id']}: {c['supported_goal']}\n    INCLUDES: {inc}\n    EXCLUDES: {exc}"
+        discs = c.get("required_discriminators", [])
+        if not discs:
+            # Explicit NONE — without it the model invents a requirement and over-clarifies
+            # a fully-specified query (the measured foreign-fee regression).
+            block += "\n    REQUIRES: none"
+        for d in discs:
+            ins = "; ".join(d.get("in_scope_values", []))
+            oos = "; ".join(d.get("out_of_scope_values", []))
+            block += (f"\n    REQUIRES {d['slot']} -> in-scope=[{ins}]  NOT=[{oos}]"
+                      f"  (bare wording is ambiguous: {d.get('ambiguous_because', '')})")
+        out.append(block)
     return "\n".join(out)
 
 
+def exemplar_block(exemplars):
+    """Render mined+approved prior decisions as few-shot calibration for the gate.
+    These come from real conversations (see mine_signals.py / adapter/learn.py):
+    a corrected ANSWER teaches CLARIFY, an accepted ANSWER reinforces it. Kept
+    short (a handful) so the gate prompt doesn't bloat."""
+    if not exemplars:
+        return ""
+    lines = []
+    for e in exemplars:
+        tag = e["disposition"] + (f" ({e['card_id']})" if e.get("card_id") else "")
+        lines.append(f'  "{e["query"]}" -> {tag}')
+    return ("\nCALIBRATION EXAMPLES (correct decisions on THIS scope file, learned from real "
+            "prior conversations — apply the same policy, do not copy blindly):\n" + "\n".join(lines))
+
+
 class ScopeBot:
-    def __init__(self, kb="seed16/cards.json"):
+    def __init__(self, kb="seed16/cards.json", use_exemplars=False, exemplar_path="exemplars.json"):
         self.cards = json.loads(Path(kb).read_text())
         self.by_id = {c["intent_id"]: c for c in self.cards}
+        self.exemplars = self._load_exemplars(exemplar_path, kb) if use_exemplars else []
         self.tok = AutoTokenizer.from_pretrained(MODEL_ID, revision=REV)
         bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                  bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
         self.m = AutoModelForCausalLM.from_pretrained(
             MODEL_ID, revision=REV, quantization_config=bnb, dtype=torch.bfloat16,
             attn_implementation="sdpa", device_map={"": 0}).eval()
+
+    def _load_exemplars(self, path, kb):
+        """Load the exemplar bank, but ONLY if it was built against the current
+        scope file — a stale bank (cards edited since) is quarantined, never used."""
+        p = Path(path)
+        if not p.exists():
+            return []
+        import hashlib
+        cur = hashlib.sha1(Path(kb).read_bytes()).hexdigest()[:12]
+        data = json.loads(p.read_text())
+        if data.get("kb_version") not in (cur, None):
+            print(f"[scope_bot] exemplar bank kb_version={data.get('kb_version')} != current {cur}; quarantined.")
+            return []
+        return data.get("exemplars", [])
 
     def _chat(self, sys, user, max_new=256):
         text = self.tok.apply_chat_template(
@@ -74,7 +124,8 @@ class ScopeBot:
         return self.tok.decode(out[0][x["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
     def gate(self, query):
-        raw = self._chat(JUDGE_SYS, f"CARDS:\n{cards_block(self.cards)}\n\nUSER QUESTION: {query}", max_new=200)
+        user = f"CARDS:\n{cards_block(self.cards)}{exemplar_block(self.exemplars)}\n\nUSER QUESTION: {query}"
+        raw = self._chat(JUDGE_SYS, user, max_new=200)
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         try:
             d = json.loads(m.group(0)) if m else {}
@@ -83,8 +134,11 @@ class ScopeBot:
         disp = d.get("disposition", "ABSTAIN")
         if disp not in ("ANSWER", "CLARIFY", "ABSTAIN"):
             disp = "ABSTAIN"
-        return {"disposition": disp, "card_id": d.get("card_id"),
-                "candidates": d.get("candidates", []), "reason": d.get("reason", "")}
+        proposed = {"disposition": disp, "card_id": d.get("card_id"),
+                    "candidates": d.get("candidates", []), "reason": d.get("reason", "")}
+        # Deterministic scope-policy: enforce the card's discriminators fail-closed.
+        # Only ever downgrades (ANSWER -> CLARIFY/ABSTAIN); never promotes.
+        return enforce_policy(query, proposed, self.by_id)
 
     def respond(self, query):
         g = self.gate(query)
@@ -93,6 +147,10 @@ class ScopeBot:
             reply = self._chat(GEN_SYS, f"APPROVED FACTS ({g['card_id']}):\n{facts}\n\nUSER QUESTION: {query}", max_new=200)
             return {"disposition": "ANSWER", "card": g["card_id"], "reply": reply, "reason": g["reason"]}
         if g["disposition"] == "CLARIFY":
+            # Prefer the card-authored clarifying question when the deterministic
+            # policy flagged a specific unresolved discriminator.
+            if g.get("clarifying_question"):
+                return {"disposition": "CLARIFY", "reply": g["clarifying_question"], "reason": g["reason"]}
             cands = [c for c in g["candidates"] if c in self.by_id][:3] or list(self.by_id)[:0]
             opts = " or ".join(self.by_id[c]["supported_goal"].rstrip(".").lower() for c in cands) if cands else "which topic you mean"
             return {"disposition": "CLARIFY", "reply": f"Just to make sure — do you mean {opts}?", "reason": g["reason"]}

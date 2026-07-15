@@ -103,3 +103,8 @@ examples/faq_router/data/
 examples/qwen_sft/outputs/
 examples/qwen_sft/.venv-qlora/
 examples/qwen_sft/hf_cache/
+# Feedback-pipeline runtime artifacts (raw customer logs, mined labels, built bank).
+# The illustrative sample log is kept; real logs and generated artifacts are not.
+examples/qwen_sft/logs/*
+!examples/qwen_sft/logs/conversations.sample.jsonl
+examples/qwen_sft/exemplars.json

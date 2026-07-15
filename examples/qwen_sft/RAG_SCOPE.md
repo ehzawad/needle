@@ -12,9 +12,9 @@ Baking domain facts/scope into weights fights the "domain is an editable file"
 requirement: a KB edit leaves stale facts in the adapter, the model can answer
 from memorized facts even when the file changed, and every scope change needs
 retrain + recalibrate + recertify — and it still doesn't break the doppelgänger
-wall. So: **no domain SFT.** The QLoRA scaffold (`train_qlora.py`, smoke/resume
-proven) stays only as an optional *challenger* and for a possible small
-*gate-only* head later — never for domain knowledge.
+wall. So: **no domain SFT.** The domain-SFT scaffold was removed as a rejected
+experiment; only a possible small *gate-only* head remains as an optional
+*challenger* (see `FEEDBACK_PIPELINE.md`) — never for domain knowledge.
 
 ## Architecture (`scope_bot.py`)
 
@@ -53,16 +53,24 @@ over-clarified.
   at ≤5% false-abstention; ~5% on truly identical text. Clarification/context is
   the only way to break it.
 
+## Update — the calibration fix shipped (see [`FEEDBACK_PIPELINE.md`](FEEDBACK_PIPELINE.md))
+
+`required_discriminators` is now implemented, but **not as a prompt hint** — the
+Council showed the LLM won't reliably obey a prompt rule. It is enforced by a
+**deterministic, fail-closed policy** ([`scope_policy.py`](scope_policy.py)) that reads
+machine-checkable cues on the card and can only downgrade a decision (ANSWER →
+CLARIFY/ABSTAIN), which also *hardens* the 0-leak property. Cards without a collision
+print `REQUIRES: none` (without it the model invents a requirement and over-clarifies).
+On the 50-scenario dev set this took the gate to **0/25 leaks, 20/20 right-card
+in-scope coverage, 5/5 ambiguous→clarify** — with no exemplar bank. Real-conversation
+signal then trains an **exemplar bank** for recall on phrasings the static cues miss
+(the mining loop: [`feedback_log.py`](feedback_log.py) → [`mine_signals.py`](mine_signals.py)
+→ [`adapter/learn.py`](adapter/learn.py)). Full design in `FEEDBACK_PIPELINE.md`.
+
 ## Next steps (in priority order)
 
-1. **Enrich the cards with `required_discriminators`** so missing scope atoms
-   force CLARIFY. e.g. add to `change_pin`:
-   ```json
-   "required_discriminators": { "pin_object": {
-       "included": ["northwind debit card", "northwind credit card"],
-       "excluded": ["SIM", "voicemail", "third-party card"], "if_missing": "clarify" } }
-   ```
-   and have the judge honor it → "How do I change my PIN?" → CLARIFY.
+1. ✅ **Cards enriched with executable `required_discriminators`** + deterministic
+   policy → "How do I change my PIN?" → CLARIFY; "…SIM PIN" → ABSTAIN; done.
 2. **Add frozen hybrid retrieval** (BM25 + a small dense encoder) to shortlist
    3–6 cards + confusable siblings, for the 150–500-intent scale (16 fit today).
 3. **Post-gen HHEM/NLI veto** — reuse the `faithful-answer` branch's verifier,
@@ -83,8 +91,10 @@ arbitrary/adversarial input, and it does not separate identical-text doppelgäng
 
 ## Files
 
-`scope_bot.py` (the bot) · `seed16/cards.json` (the scope file / KB) ·
-`seed16/{train,validation,seed_annotated}.jsonl` (eval + few-shot; NOT SFT data) ·
-`assemble_dataset.py` (workflow output → data) · `test_model.py` (qualitative harness).
-The SFT scaffold (`train_qlora.py`, `setup_env.sh`, `SFT_ABSTAIN.md`) is retained
-as a paused challenger.
+`scope_bot.py` (the bot) · `scope_policy.py` (deterministic discriminator policy) ·
+`seed16/cards.json` (the scope file / KB) · `eval50.py` + `eval50_results.txt` +
+`build_report.py`/`report.html` (dev eval + report) · `prove.py` (live-decision proof) ·
+`FEEDBACK_PIPELINE.md` + `feedback_log.py` + `mine_signals.py` + `adapter/learn.py` +
+`eval_exemplar.py` (the conversation-signal loop) · `setup_env.sh` (pinned venv to run).
+The earlier domain-SFT scaffold was removed as a rejected experiment; only a gate-only
+head survives as an optional challenger, documented in `FEEDBACK_PIPELINE.md`.
