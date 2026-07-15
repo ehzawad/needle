@@ -114,8 +114,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kb", default="seed16/cards.json")
     ap.add_argument("--query", default=None)
+    ap.add_argument("--interactive", action="store_true", help="type any query and see the live decision")
     args = ap.parse_args()
     bot = ScopeBot(args.kb)
+
+    if args.interactive:
+        print("Type a question (Ctrl-D to quit). The gate decision + the model's reason are shown live.")
+        import sys
+        for line in sys.stdin:
+            q = line.strip()
+            if not q:
+                continue
+            g = bot.gate(q)
+            r = bot.respond(q)
+            print(f"  gate: {g['disposition']} card={g['card_id']}  reason: {g['reason']}")
+            print(f"  bot : {r['reply']}\n")
+        return
+
     items = [("query", args.query)] if args.query else DEMO
     for cat, q in items:
         r = bot.respond(q)
