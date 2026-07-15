@@ -162,6 +162,51 @@ class EvaluateTest(unittest.TestCase):
         with self.assertRaises(evaluation.PromotionGateError):
             evaluation.require_offline_gate(wrong_card, config)
 
+    def test_offline_gate_enforces_ambiguous_answers_max(self):
+        # ambiguous_answers = ambiguous_total - ambiguous_clarifies. With clarifies at the
+        # min (5) but total 6, one ambiguous case was ANSWERED -> must be a floor miss,
+        # even though the clarifies-min check alone would pass.
+        config = load_config(_PKG / "config.ci.json")
+        metrics = {
+            "harmful_answers": 0, "harmful_total": 25, "right_card_answers": 20,
+            "in_scope_total": 20, "wrong_card_answers": 0, "ambiguous_clarifies": 5,
+            "ambiguous_total": 6, "errors": 0,
+        }
+        reasons = evaluation.offline_gate_reasons(metrics, config.promotion)
+        self.assertTrue(any("ambiguous_answers" in r for r in reasons), reasons)
+
+    def test_offline_checkers_parity(self):
+        # The DAG's _check_offline and evaluation.offline_gate_reasons must agree on every
+        # input so the two offline entrypoints cannot silently diverge.
+        from pipeline import dag
+
+        config = load_config(_PKG / "config.ci.json")
+        p = config.promotion
+        metric_sets = [
+            {"harmful_answers": 0, "harmful_total": 25, "right_card_answers": 20,
+             "in_scope_total": 20, "wrong_card_answers": 0, "ambiguous_clarifies": 5,
+             "ambiguous_total": 5, "errors": 0},  # clean
+            {"harmful_answers": 1, "harmful_total": 25, "right_card_answers": 20,
+             "in_scope_total": 20, "wrong_card_answers": 0, "ambiguous_clarifies": 5,
+             "ambiguous_total": 5, "errors": 0},  # a leak
+            {"harmful_answers": 0, "harmful_total": 25, "right_card_answers": 19,
+             "in_scope_total": 20, "wrong_card_answers": 1, "ambiguous_clarifies": 5,
+             "ambiguous_total": 5, "errors": 0},  # wrong card
+            {"harmful_answers": 0, "harmful_total": 25, "right_card_answers": 20,
+             "in_scope_total": 20, "wrong_card_answers": 0, "ambiguous_clarifies": 5,
+             "ambiguous_total": 6, "errors": 0},  # ambiguous answered
+            {"harmful_answers": 0, "harmful_total": 25, "right_card_answers": 20,
+             "in_scope_total": 20, "wrong_card_answers": 0, "ambiguous_clarifies": 5,
+             "ambiguous_total": 5, "errors": 3},  # gate errors
+            {},  # everything missing -> fail closed
+        ]
+        for metrics in metric_sets:
+            self.assertEqual(
+                dag._check_offline(metrics, p),
+                evaluation.offline_gate_reasons(metrics, p),
+                f"offline checkers diverged for {metrics}",
+            )
+
 
 class ServingTest(unittest.TestCase):
     def setUp(self):
@@ -256,6 +301,102 @@ class ServingTest(unittest.TestCase):
                 event_path=self.event_path,
             )
 
+    def test_malformed_card_id_fails_closed(self):
+        # A list-valued card id must NOT reach ``g_card in by_id`` (that would raise
+        # TypeError and escape the fail-closed boundary). It degrades to a safe refusal.
+        def gate(_q):
+            return {"disposition": "ANSWER", "card_id": ["not", "a", "string"],
+                    "candidates": [], "reason": "x"}
+
+        def respond(_q):
+            return {"disposition": "ANSWER", "card": self.card_id, "reply": "answer", "reason": "ok"}
+
+        serve = self._server(gate, respond, _CaptureLogger())
+        result = serve("q")  # must not raise
+        self.assertEqual(result.disposition, "ABSTAIN")
+        self.assertEqual(result.policy_action, serving.CONSISTENCY_ALERT_ACTION)
+
+    def test_malformed_respond_types_fail_closed(self):
+        # A respond whose reply/card are wrong types must not crash or leak.
+        def gate(_q):
+            return {"disposition": "ANSWER", "card_id": self.card_id, "candidates": [], "reason": "ok"}
+
+        def respond(_q):
+            return {"disposition": "ANSWER", "card": ["x"], "reply": {"not": "a string"}, "reason": 5}
+
+        serve = self._server(gate, respond, _CaptureLogger())
+        result = serve("q")  # must not raise
+        self.assertEqual(result.disposition, "ABSTAIN")
+        self.assertEqual(result.policy_action, serving.CONSISTENCY_ALERT_ACTION)
+
+
+class ServingCircuitTest(unittest.TestCase):
+    """The serving circuit breaker is ARTIFACT-SCOPED, not a global block."""
+
+    def setUp(self):
+        self.cards = json.loads(_CARDS.read_text(encoding="utf-8"))
+        self.card_id = self.cards[0]["intent_id"]
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self._tmp.name)
+        self.event_path = self.state / "observability" / "events.jsonl"
+        self.circuit_path = self.state / "circuit.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _server(self, artifact_id):
+        def gate(_q):
+            return {"disposition": "ANSWER", "card_id": self.card_id, "candidates": [], "reason": "ok"}
+
+        def respond(_q):
+            return {"disposition": "ANSWER", "card": self.card_id, "reply": "here", "reason": "ok"}
+
+        return serving.make_server(
+            artifact_id=artifact_id, cards=self.cards, gate=gate, respond=respond,
+            turn_logger=_CaptureLogger(), event_path=self.event_path,
+        )
+
+    def test_no_circuit_serves(self):
+        serve = self._server("sha256:good")
+        self.assertEqual(serve("q").disposition, "ANSWER")
+
+    def test_circuit_open_against_other_artifact_still_serves(self):
+        # Breaker names artifact B; a server for A must keep serving (not a global block).
+        self.circuit_path.write_text(
+            '{"open": true, "bad_artifact_id": "sha256:bad"}', encoding="utf-8")
+        serve = self._server("sha256:good")
+        result = serve("q")
+        self.assertEqual(result.disposition, "ANSWER")
+        self.assertNotEqual(result.policy_action, serving.CIRCUIT_OPEN_ACTION)
+
+    def test_circuit_open_against_this_artifact_blocks(self):
+        self.circuit_path.write_text(
+            '{"open": true, "bad_artifact_id": "sha256:bad"}', encoding="utf-8")
+        serve = self._server("sha256:bad")
+        result = serve("q")
+        self.assertEqual(result.disposition, "ABSTAIN")
+        self.assertEqual(result.policy_action, serving.CIRCUIT_OPEN_ACTION)
+
+    def test_open_circuit_without_bad_id_fails_closed(self):
+        self.circuit_path.write_text('{"open": true}', encoding="utf-8")
+        serve = self._server("sha256:good")
+        result = serve("q")
+        self.assertEqual(result.disposition, "ABSTAIN")
+        self.assertEqual(result.policy_action, serving.CIRCUIT_OPEN_ACTION)
+
+    def test_malformed_circuit_fails_closed(self):
+        self.circuit_path.write_text("{not valid json", encoding="utf-8")
+        serve = self._server("sha256:good")
+        result = serve("q")
+        self.assertEqual(result.disposition, "ABSTAIN")
+        self.assertEqual(result.policy_action, serving.CIRCUIT_OPEN_ACTION)
+
+    def test_explicitly_resolved_circuit_serves(self):
+        self.circuit_path.write_text(
+            '{"open": false, "bad_artifact_id": "sha256:good"}', encoding="utf-8")
+        serve = self._server("sha256:good")
+        self.assertEqual(serve("q").disposition, "ANSWER")
+
 
 class CanaryShadowTest(unittest.TestCase):
     def setUp(self):
@@ -330,6 +471,36 @@ class CanaryShadowTest(unittest.TestCase):
         )
         self.assertEqual(result["unapproved_expansions"], 0)
         self.assertTrue(result["passed"])
+
+    def test_shadow_fails_on_gate_error(self):
+        # A gate that raises every turn never expands, but errors>0 -> must FAIL the stage
+        # (it previously passed because passed was set solely from unapproved==0).
+        turns = [
+            {"query": "How do I change my PIN?", "disposition": "ABSTAIN"},
+            {"query": "What is my balance?", "disposition": "ANSWER"},
+        ]
+
+        def gate(_q):
+            raise RuntimeError("gate exploded")
+
+        result = evaluation.evaluate_shadow(
+            gate, turns, artifact_id="sha256:cand",
+            current_artifact_id="sha256:cur", approved_expansions=[],
+        )
+        self.assertEqual(result["errors"], 2)
+        self.assertEqual(result["unapproved_expansions"], 0)
+        self.assertFalse(result["passed"])
+
+    def test_canary_fails_on_malformed_serve_result(self):
+        # A serve that returns a non-TurnResult (no valid disposition) is an error: scored
+        # as a safe non-answer (never a leak) but the stage must FAIL.
+        def serve(_q):
+            return {"not": "a turnresult"}
+
+        result = evaluation.evaluate_canary(serve, self.cases, artifact_id="sha256:bad")
+        self.assertGreater(result["errors"], 0)
+        self.assertEqual(result["harmful_answers"], 0)
+        self.assertFalse(result["passed"])
 
 
 class ObservabilityTest(unittest.TestCase):

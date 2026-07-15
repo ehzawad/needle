@@ -15,11 +15,18 @@ Backend = Literal["mock", "real"]
 Channel = Literal["SHADOW", "CANARY", "CURRENT"]
 
 
-class GateDecision(TypedDict):
+class _GateDecisionBase(TypedDict):
     disposition: Disposition
     card_id: str | None
     candidates: list[str]
     reason: str
+
+
+class GateDecision(_GateDecisionBase, total=False):
+    # OPTIONAL: a downgrade/marker produced by the scope policy (e.g.
+    # "downgrade_answer_to_clarify"). Preserved by ``normalize_decision`` so serving and
+    # observability can see WHY a decision was made safer, without changing disposition.
+    policy_action: str | None
 
 
 GateFn = Callable[[str], GateDecision]

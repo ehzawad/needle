@@ -15,18 +15,27 @@ Pure standard library; nothing here imports torch/transformers/scope_bot.
 """
 from __future__ import annotations
 
+import os
 import stat
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # Make the example root importable so ``pipeline.*`` resolves regardless of runner.
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from pipeline.registry import FileRegistry, RegistryError  # noqa: E402
+from pipeline import registry as registry_module  # noqa: E402
+from pipeline.registry import (  # noqa: E402
+    SCHEMA_VERSION,
+    FileRegistry,
+    RegistryError,
+    atomic_write_bytes,
+    dumps_bytes,
+)
 from pipeline.release import (  # noqa: E402
     ReleaseError,
     promote,
@@ -35,7 +44,23 @@ from pipeline.release import (  # noqa: E402
     set_channel,
     trip_circuit,
 )
-from pipeline.source_fingerprint import sha256_bytes  # noqa: E402
+from pipeline.source_fingerprint import canonical_json, sha256_bytes  # noqa: E402
+
+
+def _write_raw_evidence(registry: FileRegistry, kind: str, body: dict) -> str:
+    """Write a fully self-consistent evidence record straight to disk, BYPASSING
+    ``write_evidence`` validation, so a test can inject the malformed-but-loadable records
+    ``promote`` must still defend against (e.g. a non-bool ``passed`` or a missing backend).
+    """
+    record = dict(body)
+    record.pop("evidence_id", None)
+    record["schema_version"] = SCHEMA_VERSION
+    record["kind"] = kind
+    record["registry_environment"] = registry.environment
+    evidence_id = f"sha256:{sha256_bytes(canonical_json(record))}"
+    record["evidence_id"] = evidence_id
+    atomic_write_bytes(registry.evidence_path(evidence_id), dumps_bytes(record))
+    return evidence_id
 
 _CARDS = b'{"cards":[{"id":"acct.balance"}]}'
 _EXEMPLARS = b'[{"q":"balance?","card":"acct.balance"}]'
@@ -178,6 +203,99 @@ class RegistryTest(unittest.TestCase):
         )
         with self.assertRaises(RegistryError):
             self.registry.load_evidence(evidence["offline"])
+
+    # -- Fix 1: evidence must be COMPLETE (backend + bool passed) at write time ------
+
+    def test_write_evidence_requires_bool_passed(self) -> None:
+        manifest, _ = _seed_candidate(self.registry)
+        artifact_id = manifest["artifact_id"]
+        base = {"artifact_id": artifact_id, "backend": "mock"}
+        for bad in (None, "true", 1, 0):  # bool subclasses int; 0/1 must NOT count
+            with self.assertRaises(RegistryError):
+                self.registry.write_evidence("offline_eval", {**base, "passed": bad})
+        with self.assertRaises(RegistryError):  # missing entirely
+            self.registry.write_evidence("offline_eval", dict(base))
+
+    def test_write_evidence_requires_backend(self) -> None:
+        manifest, _ = _seed_candidate(self.registry)
+        artifact_id = manifest["artifact_id"]
+        with self.assertRaises(RegistryError):  # missing backend
+            self.registry.write_evidence(
+                "shadow", {"artifact_id": artifact_id, "passed": True}
+            )
+        with self.assertRaises(RegistryError):  # invalid backend
+            self.registry.write_evidence(
+                "shadow", {"artifact_id": artifact_id, "backend": "gpu", "passed": True}
+            )
+
+    # -- Fix 6: verify_candidate binds served files to identity ---------------------
+
+    def test_verify_candidate_binds_files_to_identity(self) -> None:
+        manifest, _ = _seed_candidate(self.registry)
+        files_cards = (
+            self.registry.artifact_dir(manifest["artifact_id"]) / "files" / "cards.json"
+        )
+        # Overwrite the served cards.json with DIFFERENT bytes than payload.cards names.
+        files_cards.chmod(0o644)
+        files_cards.write_bytes(b'{"cards":[{"id":"not.the.identity.blob"}]}')
+        with self.assertRaises(RegistryError):
+            self.registry.verify_candidate(manifest["artifact_id"])
+
+    def test_verify_candidate_rejects_missing_candidate_file(self) -> None:
+        manifest, _ = _seed_candidate(self.registry)
+        files_ex = (
+            self.registry.artifact_dir(manifest["artifact_id"]) / "files" / "exemplars.json"
+        )
+        files_ex.unlink()
+        with self.assertRaises(RegistryError):
+            self.registry.verify_candidate(manifest["artifact_id"])
+
+    def test_verify_candidate_rejects_unexpected_candidate_file(self) -> None:
+        manifest, _ = _seed_candidate(self.registry)
+        files_dir = self.registry.artifact_dir(manifest["artifact_id"]) / "files"
+        (files_dir / "sneaky.json").write_bytes(b"{}")
+        with self.assertRaises(RegistryError):
+            self.registry.verify_candidate(manifest["artifact_id"])
+
+    def test_load_evidence_rejects_aliased_record(self) -> None:
+        manifest, evidence = _seed_candidate(self.registry)
+        # Copy the offline record onto a DIFFERENT evidence filename; it must not load as
+        # that (false) id even though its own stored evidence_id is self-consistent.
+        alias_id = "sha256:" + "ab" * 32
+        src = self.registry.evidence_path(evidence["offline"]).read_bytes()
+        self.registry.evidence_path(alias_id).write_bytes(src)
+        with self.assertRaises(RegistryError):
+            self.registry.load_evidence(alias_id)
+
+    def test_load_candidate_wraps_malformed_json(self) -> None:
+        manifest, _ = _seed_candidate(self.registry)
+        mpath = self.registry.artifact_dir(manifest["artifact_id"]) / "manifest.json"
+        mpath.chmod(0o644)
+        mpath.write_text("{not valid json", encoding="utf-8")
+        with self.assertRaises(RegistryError):
+            self.registry.load_candidate(manifest["artifact_id"])
+        with self.assertRaises(RegistryError):
+            self.registry.verify_candidate(manifest["artifact_id"])
+
+    def test_load_evidence_wraps_malformed_json(self) -> None:
+        manifest, evidence = _seed_candidate(self.registry)
+        path = self.registry.evidence_path(evidence["offline"])
+        path.chmod(0o644)
+        path.write_text("{broken", encoding="utf-8")
+        with self.assertRaises(RegistryError):
+            self.registry.load_evidence(evidence["offline"])
+
+    def test_atomic_write_tolerates_short_writes(self) -> None:
+        payload = b"0123456789abcdef" * 4
+        real_write = os.write
+
+        def short_write(fd: int, data) -> int:
+            return real_write(fd, bytes(data[:1]))  # persist at most one byte per call
+
+        target = self.root / "short_write.bin"
+        with mock.patch("pipeline.registry.os.write", side_effect=short_write):
+            registry_module.atomic_write_bytes(target, payload)
+        self.assertEqual(target.read_bytes(), payload)
 
 
 class ReleaseTest(unittest.TestCase):
@@ -349,6 +467,18 @@ class ReleaseTest(unittest.TestCase):
         # CURRENT reverted to the last good artifact; the bad one is not served.
         self.assertEqual(resolve_channel(registry, "CURRENT"), artifact_a)
 
+        # The breaker is ARTIFACT-SCOPED, not a global kill switch: it names B, so
+        # re-promoting the good artifact A (a different id) is NOT blocked by it, and A
+        # keeps resolving as CURRENT while the breaker stays open against B.
+        record = promote(
+            registry, artifact_a,
+            offline_evidence_id=evidence_a["offline"],
+            shadow_evidence_id=evidence_a["shadow"],
+            canary_evidence_id=evidence_a["canary"], actor="ci",
+        )
+        self.assertEqual(record["artifact_id"], artifact_a)
+        self.assertEqual(resolve_channel(registry, "CURRENT"), artifact_a)
+
     def test_trip_circuit_without_prior_good_disables_serving(self) -> None:
         registry = self._registry("ci")
         manifest, evidence = _seed_candidate(registry)
@@ -389,6 +519,68 @@ class ReleaseTest(unittest.TestCase):
                 shadow_evidence_id=evidence["shadow"],
                 canary_evidence_id=evidence["canary"], actor="ci",
             )
+
+    def test_promote_rejects_non_true_passed_evidence(self) -> None:
+        # A record that loads fine but whose ``passed`` is not exactly True (here None)
+        # must NOT satisfy promotion — promote requires ``passed is True``.
+        registry = self._registry("ci")
+        manifest, evidence = _seed_candidate(registry)
+        artifact_id = manifest["artifact_id"]
+        bad_offline = _write_raw_evidence(registry, "offline_eval", {
+            "artifact_id": artifact_id, "backend": "mock", "suite_sha256": "ff" * 32,
+            "passed": None, "metrics": {"harmful_answers": 0}})
+        with self.assertRaises(ReleaseError):
+            promote(
+                registry, artifact_id,
+                offline_evidence_id=bad_offline,
+                shadow_evidence_id=evidence["shadow"],
+                canary_evidence_id=evidence["canary"], actor="ci",
+            )
+        self.assertIsNone(resolve_channel(registry, "CURRENT"))
+
+    def test_demo_promote_requires_real_backend_not_just_non_mock(self) -> None:
+        # A demo promotion must require backend == "real"; a MISSING backend (not merely
+        # "mock") must also be refused. Uses a raw record to get a backend-less evidence
+        # past write_evidence's completeness guard.
+        registry = self._registry("demo")
+        manifest, evidence = _seed_candidate(registry, backend="real")
+        artifact_id = manifest["artifact_id"]
+        no_backend_offline = _write_raw_evidence(registry, "offline_eval", {
+            "artifact_id": artifact_id, "suite_sha256": "ff" * 32,
+            "passed": True, "metrics": {"harmful_answers": 0}})
+        with self.assertRaises(ReleaseError):
+            promote(
+                registry, artifact_id,
+                offline_evidence_id=no_backend_offline,
+                shadow_evidence_id=evidence["shadow"],
+                canary_evidence_id=evidence["canary"], actor="demo",
+            )
+        self.assertIsNone(resolve_channel(registry, "CURRENT"))
+
+    def test_resolve_channel_fails_closed_on_unattributable_open_circuit(self) -> None:
+        registry = self._registry("ci")
+        manifest, evidence = _seed_candidate(registry)
+        artifact_id = manifest["artifact_id"]
+        promote(
+            registry, artifact_id,
+            offline_evidence_id=evidence["offline"],
+            shadow_evidence_id=evidence["shadow"],
+            canary_evidence_id=evidence["canary"], actor="ci",
+        )
+        self.assertEqual(resolve_channel(registry, "CURRENT"), artifact_id)
+
+        # Open, but no valid bad_artifact_id -> cannot prove this artifact is safe -> block.
+        registry.circuit_path.write_text('{"open": true}', encoding="utf-8")
+        self.assertIsNone(resolve_channel(registry, "CURRENT"))
+        # Malformed circuit.json -> fail closed.
+        registry.circuit_path.write_text("{not json", encoding="utf-8")
+        self.assertIsNone(resolve_channel(registry, "CURRENT"))
+        # Open against a DIFFERENT artifact -> this one still serves (artifact-scoped).
+        registry.circuit_path.write_text(
+            '{"open": true, "bad_artifact_id": "sha256:' + "cc" * 32 + '"}',
+            encoding="utf-8",
+        )
+        self.assertEqual(resolve_channel(registry, "CURRENT"), artifact_id)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,8 @@ guarantee made operational: the frozen bot is not edited, it is cross-examined.
 
 The serving algorithm is frozen (do not reorder):
 
-  1. Check the circuit breaker and candidate integrity; if the circuit is open, refuse.
+  1. Check the circuit breaker and candidate integrity; refuse if the (artifact-scoped)
+     circuit is open against this artifact.
   2. Run the injected, policy-wrapped gate.
   3. Run the original ``respond``.
   4. Release an ANSWER only if BOTH say ANSWER with the same, valid card.
@@ -61,13 +62,26 @@ def _state_root_from_event_path(event_path: Path) -> Path:
     return Path(event_path).resolve().parent.parent
 
 
-def _circuit_open(event_path: Path) -> tuple[bool, Mapping[str, Any] | None]:
-    """Read ``<state>/circuit.json`` and decide, fail-closed, whether serving is disabled.
+def _norm_id(value: object | None) -> str | None:
+    """Normalize an artifact id to canonical ``sha256:<hex>`` form (``None`` passes)."""
+    if value is None:
+        return None
+    text = str(value)
+    return text if text.startswith("sha256:") else f"sha256:{text}"
 
-    The circuit file exists only after a trip (the release controller writes it BEFORE
-    rolling ``CURRENT`` back so serving fails closed). Its mere presence therefore means
-    'open' unless it is explicitly marked closed/resolved. An unreadable file is treated
-    as open.
+
+def _circuit_blocks(
+    event_path: Path, artifact_id: str
+) -> tuple[bool, Mapping[str, Any] | None]:
+    """Read ``<state>/circuit.json`` and decide, fail-closed, whether THIS artifact serves.
+
+    The circuit breaker is artifact-scoped, not a global kill switch: after a trip rolls
+    ``CURRENT`` from a bad artifact B back to a good artifact A, the breaker names B, so a
+    server for B must fail closed while a server for A keeps serving. The file exists only
+    after a trip (written BEFORE ``CURRENT`` is rolled back), so its presence means 'open'
+    unless explicitly marked closed/resolved. It blocks fail-closed when: it is
+    unreadable/malformed, OR it is open with no valid ``bad_artifact_id`` (we cannot prove
+    this artifact is the safe one), OR its ``bad_artifact_id`` equals ``artifact_id``.
     """
     circuit = _state_root_from_event_path(event_path) / "circuit.json"
     if not circuit.exists():
@@ -83,7 +97,13 @@ def _circuit_open(event_path: Path) -> tuple[bool, Mapping[str, Any] | None]:
         or data.get("state") == "closed"
         or bool(data.get("resolved_at"))
     )
-    return (not explicitly_closed), data
+    if explicitly_closed:
+        return False, data
+    bad = data.get("bad_artifact_id")
+    if not isinstance(bad, str) or not bad:
+        # Open but unattributable -> block fail-closed.
+        return True, data
+    return (_norm_id(bad) == _norm_id(artifact_id)), data
 
 
 def make_server(
@@ -174,8 +194,8 @@ def make_server(
         turn = state["turn"]
         t0 = time.monotonic()
 
-        # Step 1: circuit breaker + integrity — fail closed when open.
-        is_open, _circuit = _circuit_open(event_path)
+        # Step 1: circuit breaker + integrity — fail closed when open against THIS artifact.
+        is_open, _circuit = _circuit_blocks(event_path, artifact_id)
         if is_open:
             result = _safe_nonanswer(
                 reason="circuit is open; serving is disabled",
@@ -194,10 +214,19 @@ def make_server(
                 raise TypeError("gate did not return a mapping")
             g_disp = gate_decision.get("disposition")
             g_card = gate_decision.get("card_id")
-            g_reason = gate_decision.get("reason", "") or ""
+            g_reason = gate_decision.get("reason", "")
             g_action = gate_decision.get("policy_action")
+            # Validate TYPES before any comparison: a non-string card id (e.g. a list)
+            # must never reach ``g_card in by_id`` — that would raise TypeError and escape
+            # the fail-closed boundary. Any malformed field degrades to a safe value.
             if g_disp not in _DISPOSITIONS:
                 g_disp, g_card = "ABSTAIN", None
+            if not isinstance(g_card, str) or not g_card:
+                g_card = None
+            if not isinstance(g_reason, str):
+                g_reason = ""
+            if not isinstance(g_action, str) or not g_action:
+                g_action = None
         except Exception as exc:
             result = _safe_nonanswer(
                 reason=f"gate error: {type(exc).__name__}: {exc}",
@@ -217,8 +246,19 @@ def make_server(
                 raise TypeError("respond did not return a mapping")
             r_disp = respond_decision.get("disposition")
             r_card = respond_decision.get("card")
-            r_reply = respond_decision.get("reply", "") or ""
-            r_reason = respond_decision.get("reason", "") or ""
+            r_reply = respond_decision.get("reply", "")
+            r_reason = respond_decision.get("reason", "")
+            # Validate TYPES before comparison. An invalid disposition is set to None so it
+            # cannot accidentally AGREE with the gate (every gate disposition is a valid
+            # member by now) — the turn then falls to the consistency-alert safe refusal.
+            if r_disp not in _DISPOSITIONS:
+                r_disp, r_card = None, None
+            if not isinstance(r_card, str) or not r_card:
+                r_card = None
+            if not isinstance(r_reply, str):
+                r_reply = ""
+            if not isinstance(r_reason, str):
+                r_reason = ""
         except Exception as exc:
             result = _safe_nonanswer(
                 reason=f"respond error: {type(exc).__name__}: {exc}",

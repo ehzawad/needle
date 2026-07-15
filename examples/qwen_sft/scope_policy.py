@@ -22,16 +22,31 @@ conversations (see feedback_log.py / mine_signals.py / adapter/learn.py).
 """
 from __future__ import annotations
 
+import re
+
+_CUE_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _cue_matches(cue: str, text: str) -> bool:
+    """Whole-token/phrase match, not a raw substring. Raw `in` gave false hits like
+    'simplify' -> 'sim' and 'each' -> 'ach'; word boundaries fix those while still
+    matching multi-word and hyphenated cues ('checking to', 'cash-withdrawal')."""
+    pat = _CUE_CACHE.get(cue)
+    if pat is None:
+        pat = re.compile(r"(?<!\w)" + re.escape(cue.lower()) + r"(?!\w)")
+        _CUE_CACHE[cue] = pat
+    return pat.search(text) is not None
+
 
 def resolve_discriminator(query: str, disc: dict) -> tuple[str, str | None]:
     """Resolve one discriminator against the query. Out-of-scope cues win over
     in-scope cues (fail-closed). Returns (status, matched_cue)."""
-    q = " " + query.lower() + " "
+    q = query.lower()
     for cue in disc.get("out_of_scope_cues", []):
-        if cue.lower() in q:
+        if _cue_matches(cue, q):
             return "OUT_OF_SCOPE", cue
     for cue in disc.get("in_scope_cues", []):
-        if cue.lower() in q:
+        if _cue_matches(cue, q):
             return "IN_SCOPE", cue
     return "UNRESOLVED", None
 
@@ -83,10 +98,10 @@ def all_out_of_scope_cues(cards: list[dict]) -> dict[str, list[str]]:
 def query_hits_ood_cue(query: str, cards: list[dict]) -> str | None:
     """Return the first out-of-scope cue (from ANY card) present in the query, else None.
     Card-derived replacement for a hand-maintained OOD keyword list."""
-    q = " " + query.lower() + " "
+    q = query.lower()
     for c in cards:
         for d in c.get("required_discriminators", []):
             for cue in d.get("out_of_scope_cues", []):
-                if cue.lower() in q:
+                if _cue_matches(cue, q):
                     return cue
     return None

@@ -28,15 +28,9 @@ Conservative by design: when in doubt, emit low confidence or no label.
 """
 from __future__ import annotations
 
-import json
 import re
-from pathlib import Path
 
-from feedback_log import read_sessions
 from scope_policy import query_hits_ood_cue, resolve_discriminator
-
-OUT_PATH = Path("logs/mined_labels.jsonl")
-CARDS_PATH = "seed16/cards.json"
 
 CORRECTION = re.compile(
     r"\b(no+|nope|not (that|it|what)|that'?s not|thats not|wrong|actually|i meant|"
@@ -128,24 +122,3 @@ def mine(sessions: dict[str, list[dict]], cards: list[dict], llm_label=None) -> 
                 rec = llm_label(rec, t, nxt) or rec
             labels.append(rec)
     return labels
-
-
-def main():
-    cards = json.loads(Path(CARDS_PATH).read_text())
-    sessions = read_sessions()
-    labels = mine(sessions, cards)
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUT_PATH.open("w") as f:
-        for r in labels:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    by_sig: dict[str, int] = {}
-    for r in labels:
-        by_sig[r["signal"]] = by_sig.get(r["signal"], 0) + 1
-    print(f"mined {len(labels)} weak labels from {len(sessions)} sessions -> {OUT_PATH}")
-    for k, v in sorted(by_sig.items()):
-        print(f"  {k:14} {v}")
-    print(f"  needs human review: {sum(r['needs_review'] for r in labels)}")
-
-
-if __name__ == "__main__":
-    main()

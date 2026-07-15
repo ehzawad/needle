@@ -88,6 +88,18 @@ class SourceFreezeTest(unittest.TestCase):
         cases = load_eval50_cases(_ROOT / "eval50.py")
         self.assertEqual(eval_suite_sha256(cases), _CANONICAL_SUITE_SHA256)
 
+    def test_both_configs_agree_on_frozen_hashes(self) -> None:
+        # A re-freeze (e.g. editing scope_policy.py) must update ci AND demo in lockstep.
+        ci = json.loads((_PKG / "config.ci.json").read_text(encoding="utf-8"))["frozen"]
+        demo = json.loads((_PKG / "config.demo.json").read_text(encoding="utf-8"))["frozen"]
+        self.assertEqual(ci, demo, msg="ci and demo must freeze identical sources")
+        for key, rel in [
+            ("scope_bot_sha256", "scope_bot.py"),
+            ("scope_policy_sha256", "scope_policy.py"),
+            ("eval_suite_sha256", "eval50.py"),
+        ]:
+            self.assertEqual(sha256_file(_ROOT / rel), demo[key], msg=key)
+
     def test_scope_constants_extracted_by_ast(self) -> None:
         frozen = self._config()["frozen"]
         fp = read_scope_constants(_ROOT / "scope_bot.py")

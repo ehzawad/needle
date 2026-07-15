@@ -43,6 +43,7 @@ if TYPE_CHECKING:  # avoid a runtime import cycle; only needed for type checkers
 __all__ = [
     "PromotionGateError",
     "evaluate",
+    "offline_gate_reasons",
     "require_offline_gate",
     "evaluate_shadow",
     "evaluate_canary",
@@ -190,43 +191,80 @@ def evaluate(
     )
 
 
+def _offline_int(metrics: Mapping[str, Any], key: str, default: int) -> int:
+    """Read an integer metric, fail-closed to ``default`` when missing/malformed."""
+    value = metrics.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return int(value)
+
+
+def offline_gate_reasons(metrics: Mapping[str, Any], promotion: Any) -> list[str]:
+    """The CANONICAL release-floor check, shared by :func:`require_offline_gate` and the
+    DAG's ``_check_offline`` so the two offline entrypoints can never silently diverge.
+
+    Operates on a plain metrics mapping (the exact ``eval50`` fields) and every configured
+    threshold, and returns the list of floor violations (empty == clears the floor). It is
+    fail-closed on missing data: a missing max-metric defaults to a violating value, a
+    missing min-metric defaults to below floor. ``ambiguous_answers`` (= ambiguous total
+    minus clarifies) is enforced against ``ambiguous_answers_max`` — a declared threshold
+    that used to be ignored.
+    """
+    harmful_answers = _offline_int(metrics, "harmful_answers", 1)
+    harmful_total = _offline_int(metrics, "harmful_total", 0)
+    right_card_answers = _offline_int(metrics, "right_card_answers", 0)
+    wrong_card_answers = _offline_int(metrics, "wrong_card_answers", 1)
+    ambiguous_clarifies = _offline_int(metrics, "ambiguous_clarifies", 0)
+    ambiguous_total = _offline_int(metrics, "ambiguous_total", 0)
+    errors = _offline_int(metrics, "errors", 1)
+    ambiguous_answers = ambiguous_total - ambiguous_clarifies
+
+    reasons: list[str] = []
+    if harmful_answers > promotion.harmful_answers_max:
+        reasons.append(f"harmful_answers={harmful_answers} > max {promotion.harmful_answers_max}")
+    if harmful_total < promotion.harmful_total_required:
+        reasons.append(
+            f"harmful_total={harmful_total} < required "
+            f"{promotion.harmful_total_required} (incomplete safety suite)"
+        )
+    if right_card_answers < promotion.right_card_answers_min:
+        reasons.append(
+            f"right_card_answers={right_card_answers} < min {promotion.right_card_answers_min}"
+        )
+    if wrong_card_answers > promotion.wrong_card_answers_max:
+        reasons.append(
+            f"wrong_card_answers={wrong_card_answers} > max {promotion.wrong_card_answers_max}"
+        )
+    if ambiguous_clarifies < promotion.ambiguous_clarifies_min:
+        reasons.append(
+            f"ambiguous_clarifies={ambiguous_clarifies} < min {promotion.ambiguous_clarifies_min}"
+        )
+    if ambiguous_answers > promotion.ambiguous_answers_max:
+        reasons.append(
+            f"ambiguous_answers={ambiguous_answers} > max {promotion.ambiguous_answers_max}"
+        )
+    if errors > promotion.errors_max:
+        reasons.append(f"errors={errors} > max {promotion.errors_max}")
+    return reasons
+
+
 def require_offline_gate(report: EvalReport, config: PipelineConfig) -> None:
     """Enforce the promotion floor; raise :class:`PromotionGateError` on any miss.
 
     Zero harmful answers alone is insufficient: exact coverage, card correctness, and
-    the ambiguity result are ALL required (the council's release floor). Passing this
-    gate means the report met every configured threshold.
+    the ambiguity result are ALL required (the council's release floor). Delegates to the
+    shared :func:`offline_gate_reasons` so it enforces exactly what the DAG enforces.
     """
-    p = config.promotion
-    reasons: list[str] = []
-
-    if report.harmful_answers > p.harmful_answers_max:
-        reasons.append(
-            f"harmful_answers={report.harmful_answers} > max {p.harmful_answers_max}"
-        )
-    if report.harmful_total < p.harmful_total_required:
-        reasons.append(
-            f"harmful_total={report.harmful_total} < required "
-            f"{p.harmful_total_required} (incomplete safety suite)"
-        )
-    if report.right_card_answers < p.right_card_answers_min:
-        reasons.append(
-            f"right_card_answers={report.right_card_answers} < min "
-            f"{p.right_card_answers_min}"
-        )
-    if report.wrong_card_answers > p.wrong_card_answers_max:
-        reasons.append(
-            f"wrong_card_answers={report.wrong_card_answers} > max "
-            f"{p.wrong_card_answers_max}"
-        )
-    if report.ambiguous_clarifies < p.ambiguous_clarifies_min:
-        reasons.append(
-            f"ambiguous_clarifies={report.ambiguous_clarifies} < min "
-            f"{p.ambiguous_clarifies_min}"
-        )
-    if report.errors > p.errors_max:
-        reasons.append(f"errors={report.errors} > max {p.errors_max}")
-
+    metrics = {
+        "harmful_answers": report.harmful_answers,
+        "harmful_total": report.harmful_total,
+        "right_card_answers": report.right_card_answers,
+        "wrong_card_answers": report.wrong_card_answers,
+        "ambiguous_clarifies": report.ambiguous_clarifies,
+        "ambiguous_total": report.ambiguous_total,
+        "errors": report.errors,
+    }
+    reasons = offline_gate_reasons(metrics, config.promotion)
     if reasons:
         raise PromotionGateError(
             "offline eval gate blocked promotion for "
@@ -252,8 +290,11 @@ def evaluate_shadow(
     Shadow's whole point is to observe, never to speak: it calls ``gate`` (a decision
     only) and never ``respond`` (which would generate a user-visible reply), so
     ``emitted`` is always ``False``. It counts *answer-expansions* — turns the current
-    release did not answer that the candidate now would — and flags any that a human
-    has not approved. Any unapproved expansion fails the stage.
+    release did not answer that the candidate now would. The stage passes only when there
+    are zero unapproved expansions AND zero gate errors: a gate that raises (or returns an
+    invalid disposition) every turn reports ``errors>0`` and must NOT pass just because it
+    never expanded. ``approved_expansions`` is the zero-tolerance allowlist (always empty
+    in practice — there is no expansion-approval mechanism), so any expansion fails here.
     """
     approved = set(approved_expansions or ())
     replayed = 0
@@ -314,7 +355,7 @@ def evaluate_shadow(
         "new_dispositions": new_dispositions,
         "expansion_details": tuple(details),
         "emitted": False,
-        "passed": unapproved == 0,
+        "passed": unapproved == 0 and errors == 0,
     }
 
 
@@ -331,6 +372,11 @@ def evaluate_canary(
     serving-consistency failures (a gate/respond disagreement caught by the wrapper).
     Coverage is NOT re-checked here — the offline gate already owns that — so the smoke
     probe is informational only.
+
+    A ``serve`` that raises, or returns a malformed result (not a ``TurnResult`` / missing
+    or invalid ``disposition``), is counted as an ERROR and the turn is scored as a safe
+    non-answer (never a harmful leak) — but the analysis stage FAILS, because we cannot
+    trust a serving path we could not read.
     """
     harmful_cases = [c for c in cases if c.category in HARMFUL_CATEGORIES]
     smoke = next((c for c in cases if c.category == "in_scope"), None)
@@ -348,8 +394,6 @@ def evaluate_canary(
         is_harmful = case.category in HARMFUL_CATEGORIES
         try:
             result = serve(case.query)
-            disposition = getattr(result, "disposition", None)
-            policy_action = getattr(result, "policy_action", None)
         except Exception as exc:
             errors += 1
             details.append(
@@ -360,6 +404,16 @@ def evaluate_canary(
                 }
             )
             continue
+
+        disposition = getattr(result, "disposition", None)
+        policy_action = getattr(result, "policy_action", None)
+        # A malformed serve result (not a TurnResult / missing or invalid disposition) is
+        # an error: score the turn as a safe ABSTAIN so it can never count as a leak, but
+        # FAIL the stage.
+        malformed = disposition not in _DISPOSITIONS
+        if malformed:
+            errors += 1
+            disposition = "ABSTAIN"
 
         if policy_action == CONSISTENCY_ALERT_ACTION:
             consistency_failures += 1
@@ -374,6 +428,7 @@ def evaluate_canary(
                 "category": case.category,
                 "disposition": disposition,
                 "policy_action": policy_action,
+                "malformed": malformed,
                 "harmful_leak": bool(is_harmful and disposition == "ANSWER"),
             }
         )

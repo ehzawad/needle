@@ -27,11 +27,14 @@ cards.json + conversation logs
         ▼
    SHADOW  (replay prior turns, emit nothing) ──fail─► stop
         ▼
-   CANARY  (serve all 25 harmful + smoke; leak>0 ⇒ circuit) ──fail─► stop
+   CANARY  (serve all 25 harmful + smoke; leak>0 ⇒ BLOCK, CURRENT unchanged, candidate quarantined) ──fail─► stop
         ▼
    PROMOTE  atomic CURRENT swap ──► SERVE ──► OBSERVE ──► (mined signal loops back)
-                                       └─ rollback / circuit-breaker on any leak
+                                       └─ a mined leak against the PROMOTED CURRENT ⇒ circuit-breaker + rollback
 ```
+(A candidate that fails canary is quarantined and never promoted — `CURRENT` is left
+alone. The circuit-breaker + rollback path is for a leak discovered against the
+*already-promoted* `CURRENT`, not for a rejected candidate.)
 
 ## Component → real-world analog (the payoff)
 
@@ -48,7 +51,7 @@ cards.json + conversation logs
 | [`build_plane.py`](build_plane.py) + review queue | **training job + Label Studio/Scale** | reviewed labels → candidate artifact; human gate on answer-expanding labels |
 | [`source_fingerprint.py`](source_fingerprint.py) | **DVC / in-toto attestation** | canonical hashing + a source-freeze the pipeline refuses to run against if broken |
 | [`config.py`](config.py) + `config.*.json` | **Hydra / Helm values** | config-as-code, one immutable resolved config per run |
-| [`gpu_worker.py`](gpu_worker.py) | **the guarded training/eval pod** | the ONLY process that loads the model; guards itself before importing torch |
+| [`gpu_worker.py`](gpu_worker.py) | **the guarded GPU eval pod** | the ONLY process that loads the model; guards itself before importing torch |
 
 ## Deliberately **cut** (named, so the curation is visible)
 
@@ -99,11 +102,18 @@ cd examples/qwen_sft
 # full DAG on the REAL model (A5000-pinned by the guard; no CUDA env needed)
 .venv-qlora/bin/python -m pipeline run --config pipeline/config.demo.json --state .pipeline-a5000 --backend real --promote --actor a5000-demo
 
-# the HTTP serving microservice
+# the HTTP serving microservice (currently a MOCK-gate boundary demo — see note below)
 .venv-qlora/bin/python -m pipeline serve --config pipeline/config.demo.json --state .pipeline-a5000 --http 127.0.0.1:8080
 curl -s :8080/gate -d '{"query":"How do I change my PIN?"}'      # -> CLARIFY
 curl -s :8080/gate -d '{"query":"How do I change my SIM PIN?"}'  # -> ABSTAIN
 ```
+
+> **HTTP serving is a mock-gate boundary demo, not real-model serving.** The endpoint
+> exercises the serving *contract* (fail-closed dual-decision, `/healthz`, JSON in/out)
+> with a deterministic mock gate; it does **not** load Qwen. Real model work only ever
+> happens inside the guarded `gpu_worker` (offline/shadow/canary evidence). Wiring the
+> HTTP path to real worker-backed serving + persistent `TurnLogger` is a known gap, left
+> open deliberately under "remove redundancy, add no features".
 
 State (`.pipeline-*/`) is a runtime artifact and git-ignored: `blobs/`, `artifacts/`,
 `evidence/`, `channels/{SHADOW,CANARY,CURRENT}`, `releases/history.jsonl`, `circuit.json`,

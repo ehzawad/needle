@@ -91,10 +91,6 @@ arbitrary/adversarial input, and it does not separate identical-text doppelgäng
 
 ## Files
 
-`scope_bot.py` (the bot) · `scope_policy.py` (deterministic discriminator policy) ·
-`seed16/cards.json` (the scope file / KB) · `eval50.py` + `eval50_results.txt` +
-`build_report.py`/`report.html` (dev eval + report) · `prove.py` (live-decision proof) ·
-`FEEDBACK_PIPELINE.md` + `feedback_log.py` + `mine_signals.py` + `adapter/learn.py` +
-`eval_exemplar.py` (the conversation-signal loop) · `setup_env.sh` (pinned venv to run).
-The earlier domain-SFT scaffold was removed as a rejected experiment; only a gate-only
-head survives as an optional challenger, documented in `FEEDBACK_PIPELINE.md`.
+See the top-level [`README.md`](README.md) for the current file map. The earlier
+domain-SFT scaffold was removed as a rejected experiment; only a gate-only head
+survives as an optional challenger, documented in [`FEEDBACK_PIPELINE.md`](FEEDBACK_PIPELINE.md).

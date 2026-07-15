@@ -67,6 +67,25 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def write_all(fd: int, data: bytes) -> None:
+    """Write EVERY byte of ``data`` to ``fd``, looping over short ``os.write`` returns.
+
+    ``os.write`` is permitted to write fewer bytes than requested (notably on pipes, and
+    in principle on any fd); a single call is not guaranteed to persist the whole buffer.
+    Callers that append audit records or publish durable files must not silently drop the
+    tail, so this loops until the buffer is fully written and fails closed if a write
+    makes no progress.
+    """
+    view = memoryview(data)
+    total = 0
+    length = len(view)
+    while total < length:
+        written = os.write(fd, view[total:])
+        if written <= 0:
+            raise RegistryError("write_all: os.write made no progress")
+        total += written
+
+
 def atomic_write_bytes(path: Path, data: bytes, *, read_only: bool = False) -> None:
     """Atomically publish ``data`` at ``path``: write a same-directory temp file,
     ``fsync`` it, ``os.replace`` it into place, then ``fsync`` the directory.
@@ -81,7 +100,7 @@ def atomic_write_bytes(path: Path, data: bytes, *, read_only: bool = False) -> N
     try:
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.write(fd, data)
+            write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -332,7 +351,12 @@ class FileRegistry:
         manifest_path = self.artifact_dir(artifact_id) / "manifest.json"
         if not manifest_path.is_file():
             raise RegistryError(f"load_candidate: unknown artifact {artifact_id}")
-        manifest = json.loads(manifest_path.read_text("utf-8"))
+        try:
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RegistryError(
+                f"load_candidate: manifest for {artifact_id} is unreadable ({exc})"
+            ) from exc
         if not isinstance(manifest, dict):
             raise RegistryError(f"load_candidate: manifest for {artifact_id} is not an object")
         return manifest
@@ -377,7 +401,55 @@ class FileRegistry:
                 raise RegistryError(f"verify_candidate: corrupted blob {ref['sha256']}")
 
         files_dir = self.artifact_dir(artifact_id) / "files"
-        if files_dir.is_dir():
+
+        if manifest.get("kind") == _CANDIDATE_KIND:
+            # Bind the SERVED files to the artifact's identity: the payload names exactly
+            # which blob is the cards KB and which is the exemplar bank, and the served
+            # copies MUST be those blobs byte-for-byte. Without this, an identity that
+            # hashes cards blob A could ship a files/cards.json holding a different (but
+            # individually valid) blob B, and serving would load B while verification
+            # trusted A. Any missing/mismatched/unexpected candidate file fails closed.
+            payload = manifest.get("payload")
+            if not isinstance(payload, Mapping):
+                raise RegistryError(
+                    f"verify_candidate: manifest for {expected_id} has no payload mapping"
+                )
+            required_files = {"cards.json": "cards", "exemplars.json": "exemplar_bank"}
+            present = (
+                {m.name for m in files_dir.iterdir() if m.is_file()}
+                if files_dir.is_dir()
+                else set()
+            )
+            unexpected = present - set(required_files)
+            if unexpected:
+                raise RegistryError(
+                    f"verify_candidate: unexpected candidate file(s) "
+                    f"{sorted(unexpected)} for {expected_id}"
+                )
+            for fname, payload_key in required_files.items():
+                ref = payload.get(payload_key)
+                if not isinstance(ref, Mapping) or not isinstance(ref.get("sha256"), str):
+                    raise RegistryError(
+                        f"verify_candidate: payload.{payload_key} is not a blob reference "
+                        f"for {expected_id}"
+                    )
+                member = files_dir / fname
+                if not member.is_file():
+                    raise RegistryError(
+                        f"verify_candidate: missing candidate file {fname} for {expected_id}"
+                    )
+                raw = member.read_bytes()
+                if sha256_bytes(raw) != ref["sha256"]:
+                    raise RegistryError(
+                        f"verify_candidate: candidate file {fname} does not match "
+                        f"payload.{payload_key} for {expected_id}"
+                    )
+                blob_path = self.blobs_dir / ref["sha256"]
+                if not blob_path.is_file() or blob_path.read_bytes() != raw:
+                    raise RegistryError(
+                        f"verify_candidate: file {fname} is not backed by an intact blob"
+                    )
+        elif files_dir.is_dir():
             for member in sorted(files_dir.iterdir()):
                 if not member.is_file():
                     continue
@@ -405,6 +477,12 @@ class FileRegistry:
         permanently marked mock). ``evidence_id = "sha256:" + sha256(canonical(record
         without evidence_id))``, so a given result has a stable id and any later edit
         changes it. Writing an identical record is idempotent.
+
+        Evidence is safety-bearing, so it is rejected fail-closed unless it is COMPLETE:
+        ``backend`` must be exactly ``mock``/``real`` (a missing/None/other backend cannot
+        be written, so a later demo promotion can trust the field), and ``passed`` must be
+        a genuine bool for EVERY kind (a missing/None/0/"true" ``passed`` can never be
+        recorded and then silently satisfy a promotion gate).
         """
         if kind not in _EVIDENCE_KINDS:
             raise RegistryError(f"write_evidence: kind must be one of {_EVIDENCE_KINDS}")
@@ -414,8 +492,16 @@ class FileRegistry:
         record["kind"] = kind
         record["registry_environment"] = self.environment
         backend = record.get("backend")
-        if backend is not None and backend not in ("mock", "real"):
-            raise RegistryError(f"write_evidence: backend must be 'mock' or 'real', got {backend!r}")
+        if backend not in ("mock", "real"):
+            raise RegistryError(
+                f"write_evidence: backend must be 'mock' or 'real', got {backend!r}"
+            )
+        # bool is a subclass of int; ``isinstance(x, bool)`` rejects 0/1/None/"true" so a
+        # malformed pass flag can never be promoted on.
+        if not isinstance(record.get("passed"), bool):
+            raise RegistryError(
+                f"write_evidence: passed must be a bool, got {record.get('passed')!r}"
+            )
 
         digest = sha256_bytes(canonical_json(record))
         evidence_id = f"sha256:{digest}"
@@ -428,16 +514,30 @@ class FileRegistry:
 
     def load_evidence(self, evidence_id: str) -> Mapping[str, Any]:
         """Load an evidence record, re-deriving its id to detect tampering (fail-closed)."""
+        requested = str(with_sha256_prefix(evidence_id))
         path = self.evidence_path(evidence_id)
         if not path.is_file():
             raise RegistryError(f"load_evidence: unknown evidence {evidence_id}")
-        record = json.loads(path.read_text("utf-8"))
+        try:
+            record = json.loads(path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RegistryError(
+                f"load_evidence: evidence {evidence_id} is unreadable ({exc})"
+            ) from exc
         if not isinstance(record, dict):
             raise RegistryError(f"load_evidence: record {evidence_id} is not an object")
         body = {k: v for k, v in record.items() if k != "evidence_id"}
         recomputed = f"sha256:{sha256_bytes(canonical_json(body))}"
         if record.get("evidence_id") != recomputed:
             raise RegistryError(f"load_evidence: tampered evidence {evidence_id}")
+        # Bind the record to the filename it was requested under: a record copied to a
+        # different evidence path (its stored id still self-consistent) must NOT load as
+        # the requested id, or an alias could smuggle one result in under another's name.
+        if recomputed != requested:
+            raise RegistryError(
+                f"load_evidence: evidence id mismatch (requested {requested}, "
+                f"content is {recomputed})"
+            )
         return record
 
     # -- release-controller path helpers -----------------------------------

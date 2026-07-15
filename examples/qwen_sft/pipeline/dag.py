@@ -54,19 +54,8 @@ if TYPE_CHECKING:  # import-light: only for type checkers, no runtime coupling.
 
 __all__ = ["run_pipeline", "verify_run", "PipelineBlocked"]
 
-# Stage identifiers, in mandatory order. Versions bump when a stage's semantics change,
-# invalidating its cache without touching another stage.
-STAGE_ORDER: tuple[str, ...] = (
-    "INGEST",
-    "MINE",
-    "REVIEW_QUEUE",
-    "BUILD_CANDIDATE",
-    "REGISTER",
-    "OFFLINE_EVAL",
-    "SHADOW",
-    "CANARY",
-    "PROMOTE",
-)
+# Stage cache version. Bumps when a stage's semantics change, invalidating its cache
+# without touching another stage.
 _STAGE_VERSION = "1"
 
 # A mined UNDER_CLARIFY at/above this confidence is treated as a safety regression on the
@@ -437,20 +426,13 @@ def _parse_worker_bundle(stdout: str, out_path: Path) -> dict[str, Any] | None:
 
 
 def _check_offline(metrics: Mapping[str, Any], promotion: Any) -> list[str]:
-    reasons: list[str] = []
-    if int(metrics.get("harmful_answers", 1)) > promotion.harmful_answers_max:
-        reasons.append(f"harmful_answers={metrics.get('harmful_answers')}")
-    if int(metrics.get("harmful_total", 0)) < promotion.harmful_total_required:
-        reasons.append(f"harmful_total={metrics.get('harmful_total')} < {promotion.harmful_total_required}")
-    if int(metrics.get("right_card_answers", 0)) < promotion.right_card_answers_min:
-        reasons.append(f"right_card_answers={metrics.get('right_card_answers')} < {promotion.right_card_answers_min}")
-    if int(metrics.get("wrong_card_answers", 1)) > promotion.wrong_card_answers_max:
-        reasons.append(f"wrong_card_answers={metrics.get('wrong_card_answers')}")
-    if int(metrics.get("ambiguous_clarifies", 0)) < promotion.ambiguous_clarifies_min:
-        reasons.append(f"ambiguous_clarifies={metrics.get('ambiguous_clarifies')} < {promotion.ambiguous_clarifies_min}")
-    if int(metrics.get("errors", 1)) > promotion.errors_max:
-        reasons.append(f"errors={metrics.get('errors')}")
-    return reasons
+    """Offline release-floor check for the DAG.
+
+    Delegates to the SINGLE canonical checker :func:`evaluation.offline_gate_reasons` so
+    the DAG and :func:`evaluation.require_offline_gate` enforce identical thresholds
+    (including ``ambiguous_answers_max``) and cannot silently diverge.
+    """
+    return evaluation.offline_gate_reasons(metrics, promotion)
 
 
 def _offline_metric_view(offline: Mapping[str, Any]) -> dict[str, Any]:
@@ -717,8 +699,10 @@ def run_pipeline(
             compute=_do_review, verify=_verify_mine,
         )
 
-        # Approved answer-expansions a human signed off on (empty in CI). Kept for the
-        # shadow gate; a real reviewer adds them via `pipeline review set`.
+        # Shadow answer-expansions are ZERO-TOLERANCE: this allowlist is ALWAYS empty
+        # because there is no expansion-approval mechanism. `pipeline review set` records
+        # decisions on mined LABELS (for BUILD_CANDIDATE), NOT shadow expansions — it does
+        # not populate this list. Any shadow expansion therefore fails the SHADOW stage.
         approved: list[str] = []
 
         # --- BUILD_CANDIDATE ---------------------------------------------
@@ -808,6 +792,13 @@ def run_pipeline(
                 artifact_id, snapshot=snapshot, cases=cases, suite_sha256=suite_sha256,
                 current_artifact_id=current_before, approved=approved)
             shadow = bundle["shadow"]
+            p = config.promotion
+            # Recompute pass status from the configured thresholds (never merely trust the
+            # analyzer's own flag): zero-tolerance unapproved expansions AND zero errors.
+            shadow_passed = (
+                int(shadow.get("unapproved_expansions", 1)) <= p.shadow_unapproved_expansions_max
+                and int(shadow.get("errors", 1)) == 0
+            )
             body = {
                 "artifact_id": artifact_id, "backend": backend,
                 "current_artifact_id": current_before,
@@ -816,11 +807,11 @@ def run_pipeline(
                             "approved_expansions": shadow.get("approved_expansions", 0),
                             "unapproved_expansions": shadow.get("unapproved_expansions", 0),
                             "errors": shadow.get("errors", 0)},
-                "passed": bool(shadow.get("passed")),
+                "passed": shadow_passed,
             }
             evidence = registry.write_evidence("shadow", body)
             payload = {"evidence_id": evidence["evidence_id"],
-                       "passed": bool(shadow.get("passed")),
+                       "passed": shadow_passed,
                        "metrics": body["metrics"], "record": dict(evidence)}
             return ({"evidence_id": evidence["evidence_id"]},
                     {**body["metrics"], "passed": body["passed"]}, payload)
@@ -843,12 +834,21 @@ def run_pipeline(
                                "evidence_id": shadow_payload["evidence_id"]},
                       payload=shadow_payload, reason=block_reason,
                       error_code="shadow_expansion")
-        # Passed: stage the SHADOW channel at the candidate.
+        # Passed: stage the SHADOW channel at the candidate. A channel-write failure must
+        # BLOCK the SHADOW stage (not be swallowed) so a later promotion cannot proceed on
+        # a staging pointer that was never written. Route it through ctx.block so the run
+        # summary is preserved rather than lost to an escaping exception.
         try:
             release.set_channel(registry, "SHADOW", artifact_id,
                                 evidence_ids=[shadow_payload["evidence_id"]], actor=actor)
-        except Exception:
-            pass
+        except Exception as exc:
+            ctx.block("SHADOW", ctx.results["SHADOW"].cache_key,
+                      metrics=ctx.results["SHADOW"].metrics,
+                      outputs={"artifact_id": artifact_id,
+                               "evidence_id": shadow_payload["evidence_id"]},
+                      payload={**shadow_payload, "channel_error": str(exc)},
+                      reason=f"shadow channel write failed: {exc}",
+                      error_code="shadow_channel_write")
 
         # --- CANARY -------------------------------------------------------
         def _do_canary() -> tuple[Mapping[str, str], Mapping[str, Any], dict[str, Any]]:
@@ -856,6 +856,14 @@ def run_pipeline(
                 artifact_id, snapshot=snapshot, cases=cases, suite_sha256=suite_sha256,
                 current_artifact_id=current_before, approved=approved)
             canary = bundle["canary"]
+            p = config.promotion
+            # Recompute pass status from the configured thresholds plus zero errors, so a
+            # broken/malformed serving path (errors>0) can never pass on default flags.
+            canary_passed = (
+                int(canary.get("harmful_answers", 1)) <= p.canary_harmful_answers_max
+                and int(canary.get("consistency_failures", 1)) <= p.canary_consistency_failures_max
+                and int(canary.get("errors", 1)) == 0
+            )
             body = {
                 "artifact_id": artifact_id, "backend": backend,
                 "metrics": {"probes_total": canary.get("probes_total", 0),
@@ -863,11 +871,11 @@ def run_pipeline(
                             "consistency_failures": canary.get("consistency_failures", 0),
                             "errors": canary.get("errors", 0),
                             "smoke_answered": canary.get("smoke_answered", False)},
-                "passed": bool(canary.get("passed")),
+                "passed": canary_passed,
             }
             evidence = registry.write_evidence("canary", body)
             payload = {"evidence_id": evidence["evidence_id"],
-                       "passed": bool(canary.get("passed")),
+                       "passed": canary_passed,
                        "metrics": body["metrics"], "record": dict(evidence)}
             return ({"evidence_id": evidence["evidence_id"]},
                     {**body["metrics"], "passed": body["passed"]}, payload)
@@ -881,11 +889,19 @@ def run_pipeline(
         evidence_ids["canary"] = canary_payload["evidence_id"]
         canary_metrics = canary_payload["metrics"]
         evidence_records.append(registry.load_evidence(canary_payload["evidence_id"]))
+        # A CANARY channel-write failure BLOCKS the stage (same reasoning as SHADOW): do
+        # not swallow it and let a promotion proceed on an unwritten staging pointer.
         try:
             release.set_channel(registry, "CANARY", artifact_id,
                                 evidence_ids=[canary_payload["evidence_id"]], actor=actor)
-        except Exception:
-            pass
+        except Exception as exc:
+            ctx.block("CANARY", ctx.results["CANARY"].cache_key,
+                      metrics=ctx.results["CANARY"].metrics,
+                      outputs={"artifact_id": artifact_id,
+                               "evidence_id": canary_payload["evidence_id"]},
+                      payload={**canary_payload, "channel_error": str(exc)},
+                      reason=f"canary channel write failed: {exc}",
+                      error_code="canary_channel_write")
         if not canary_payload["passed"]:
             # Fail: leave CURRENT unchanged. The candidate is quarantined (never promoted);
             # the genuine circuit+rollback path is the mined-regression case on CURRENT.

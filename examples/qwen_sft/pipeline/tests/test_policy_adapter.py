@@ -126,6 +126,43 @@ class PolicyDowngradeTest(unittest.TestCase):
         self.assertEqual(decision["disposition"], "ANSWER")
         self.assertEqual(decision["card_id"], "change_pin")
 
+    def test_policy_action_preserved_on_downgrade(self) -> None:
+        # The reason a decision was made safer must survive into serving/observability.
+        raw = lambda q: {"disposition": "ANSWER", "card_id": "change_pin", "candidates": [], "reason": "raw"}
+        wrapped = policy_wrapped_gate(raw, _CARDS)
+        self.assertEqual(
+            wrapped("How do I change my PIN?").get("policy_action"),
+            "downgrade_answer_to_clarify",
+        )
+
+
+class CueBoundaryTest(unittest.TestCase):
+    """Regressions for the substring->word-boundary cue fix: whole-token matching must
+    stop false abstentions ('simplify'->sim, 'each'->ach, 'email address'->address)
+    while still catching the real out-of-scope cues."""
+
+    def _answer(self, card_id: str):
+        return lambda q: {"disposition": "ANSWER", "card_id": card_id, "candidates": [], "reason": "raw"}
+
+    def test_substring_false_positives_no_longer_abstain(self) -> None:
+        wrapped_pin = policy_wrapped_gate(self._answer("change_pin"), _CARDS)
+        # 'simplify' must not match the 'sim' out-of-scope cue.
+        self.assertEqual(wrapped_pin("simplify changing my card PIN")["disposition"], "ANSWER")
+        wrapped_tr = policy_wrapped_gate(self._answer("transfer"), _CARDS)
+        # 'each' must not match the 'ach' out-of-scope cue.
+        self.assertEqual(wrapped_tr("move between my own accounts each week")["disposition"], "ANSWER")
+        wrapped_uc = policy_wrapped_gate(self._answer("update_contact"), _CARDS)
+        # 'email address' must not match the (now narrowed) 'address' out-of-scope cue.
+        self.assertEqual(wrapped_uc("update my email address")["disposition"], "ANSWER")
+
+    def test_real_out_of_scope_cues_still_downgrade(self) -> None:
+        wrapped_pin = policy_wrapped_gate(self._answer("change_pin"), _CARDS)
+        self.assertEqual(wrapped_pin("change my SIM PIN")["disposition"], "ABSTAIN")
+        wrapped_tr = policy_wrapped_gate(self._answer("transfer"), _CARDS)
+        self.assertEqual(wrapped_tr("send it to my friend at Chase")["disposition"], "ABSTAIN")
+        wrapped_uc = policy_wrapped_gate(self._answer("update_contact"), _CARDS)
+        self.assertEqual(wrapped_uc("update my mailing address")["disposition"], "ABSTAIN")
+
 
 class NormalizeDecisionTest(unittest.TestCase):
     def test_unknown_disposition_clamps_to_abstain(self) -> None:

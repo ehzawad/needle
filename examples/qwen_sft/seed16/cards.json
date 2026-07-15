@@ -616,9 +616,10 @@
           "cell number"
         ],
         "out_of_scope_cues": [
-          "address",
-          "mailing",
+          "mailing address",
           "home address",
+          "street address",
+          "mailing",
           "name change",
           "legal name",
           "my name"

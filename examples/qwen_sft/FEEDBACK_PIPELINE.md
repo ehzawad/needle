@@ -1,4 +1,4 @@
-# Robust scope-gate pipeline — conversation signal trains the adapter
+# Robust scope-gate pipeline — conversation signal builds the exemplar bank
 
 > Reconciled with a 4-role Codex Council (clarify-calibration, conversation-signal,
 > adapter-training, robust-pipeline). This document is the design of record. The
@@ -78,10 +78,11 @@ gate decision was right:
 | ABSTAIN | "I mean the foreign-transaction fee" (rephrase in-scope) | **OVER_ABSTAIN** → review |
 
 Reviewed high-confidence labels become a small, per-card-capped **exemplar bank**
-injected into the gate prompt (opt-in; off in the base-gate eval). An earlier held-out
-probe showed 5 real-conversation exemplars flip *paraphrases* of the logged queries
-from wrong-guess to correct-clarify with no regression — i.e. the signal generalizes,
-without retraining.
+injected into the gate prompt (opt-in; off in the base-gate eval). An exploratory
+held-out probe (a one-off, not part of the shipped suite) suggested a handful of
+real-conversation exemplars can flip *paraphrases* of logged queries from wrong-guess
+to correct-clarify — encouraging, but treat it as a hypothesis, not release evidence.
+This is training-free: it edits the prompt context, not the weights.
 
 **Guardrails baked into the miner (all Council findings):** silence is not acceptance;
 a terse valid clarification answer is not over-clarification; OOD vocabulary is derived
@@ -151,12 +152,6 @@ controller, a review UI, durable governed logging. **Wrong at any scale:** domai
 SFT, training the generator, a dual-verifier ensemble, the LLM's self-reported
 confidence as a certificate.
 
-## Files
-
-`scope_policy.py` (deterministic discriminator enforcement, no torch) ·
-`scope_bot.py` (gate + policy + grounded gen + opt-in exemplars) ·
-`seed16/cards.json` (scope file; 6 cards carry executable discriminators) ·
-`feedback_log.py` (per-turn telemetry) · `mine_signals.py` (weak-label miner) ·
-`adapter/learn.py` (reviewed labels → exemplar bank) · `eval50.py` (dev eval, right-card
-+ 5 metrics) · `logs/conversations.sample.jsonl` (illustrative traffic).
-Runtime artifacts (`logs/*.jsonl` real logs, `exemplars.json`) are git-ignored.
+See the top-level [`README.md`](README.md) for the file map, and
+[`pipeline/PIPELINE.md`](pipeline/PIPELINE.md) for how this feedback loop is
+orchestrated (offline → shadow → canary → promote).

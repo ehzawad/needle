@@ -20,12 +20,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from feedback_log import kb_version  # noqa: E402
+from feedback_log import kb_version
 
 LABELS = Path("logs/mined_labels.jsonl")
-OUT = Path("exemplars.json")
 MIN_CONF = 0.7          # high-confidence signals only
 PER_CARD_CAP = 3        # avoid gate-prompt bloat; newest-approved win
 GLOBAL_CAP = 40
@@ -93,13 +90,3 @@ def build(kb="seed16/cards.json") -> list[dict]:
         if len(bank) >= GLOBAL_CAP:
             break
     return bank
-
-
-def main():
-    bank = build()
-    OUT.write_text(json.dumps({"kb_version": kb_version(), "exemplars": bank}, indent=2) + "\n")
-    print(f"wrote {len(bank)} exemplars -> {OUT} (kb {kb_version()})")
-
-
-if __name__ == "__main__":
-    main()

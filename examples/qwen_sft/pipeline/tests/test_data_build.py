@@ -195,7 +195,7 @@ class BuildFlowTest(unittest.TestCase):
                 snapshot, labels_blob, queue_path, registry, parent_artifact_id=None
             )
             document = json.loads(candidate["files"]["exemplars.json"].decode("utf-8"))
-            self.assertEqual(document["kb_version"], "a44f2852bbeb")
+            self.assertEqual(document["kb_version"], "1acfd6ce4a70")
             # The existing builder keeps the four high-confidence, approved exemplars; the
             # pending answer-expanding label is excluded and does NOT block the build.
             self.assertEqual(len(document["exemplars"]), 4)

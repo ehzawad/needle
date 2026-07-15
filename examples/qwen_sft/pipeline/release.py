@@ -40,6 +40,7 @@ from pipeline.registry import (
     dumps_bytes,
     utc_now_iso,
     with_sha256_prefix,
+    write_all,
 )
 from pipeline.source_fingerprint import canonical_json, sha256_bytes
 
@@ -101,6 +102,24 @@ def _read_circuit(registry: FileRegistry) -> dict[str, Any]:
     return data
 
 
+def _circuit_blocks(circuit: Mapping[str, Any], artifact_id: str | None) -> bool:
+    """Artifact-scoped circuit decision (fail-closed).
+
+    The circuit breaker is a per-artifact quarantine, not a global kill switch: a CLOSED
+    circuit never blocks, and an OPEN circuit blocks ONLY the artifact it names, so a
+    server for a different (e.g. rolled-back) artifact keeps serving. But an open circuit
+    whose ``bad_artifact_id`` is missing/invalid — including the ``open`` sentinel
+    :func:`_read_circuit` returns for an unreadable/malformed ``circuit.json`` — blocks
+    fail-closed, because we cannot prove the artifact in hand is the safe one.
+    """
+    if not circuit.get("open"):
+        return False
+    bad = circuit.get("bad_artifact_id")
+    if not isinstance(bad, str) or not bad:
+        return True
+    return _norm(bad) == _norm(artifact_id)
+
+
 def _append_history(registry: FileRegistry, record: Mapping[str, Any]) -> None:
     """Durably append one JSON line to ``releases/history.jsonl`` (called under lock)."""
     path = registry.history_path
@@ -108,7 +127,7 @@ def _append_history(registry: FileRegistry, record: Mapping[str, Any]) -> None:
     line = (json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
-        os.write(fd, line)
+        write_all(fd, line)  # loop over short os.write returns so no audit tail is lost
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -231,15 +250,19 @@ def promote(
                     f"promote: {kind} evidence references "
                     f"{evidence.get('artifact_id')}, not {artifact_id}"
                 )
-            if evidence.get("passed") is False:
-                raise ReleaseError(f"promote: {kind} evidence did not pass; refusing promotion")
-            if registry.environment == "demo" and evidence.get("backend") == "mock":
+            if evidence.get("passed") is not True:
                 raise ReleaseError(
-                    f"promote: refusing mock-backed {kind} evidence in a demo registry"
+                    f"promote: {kind} evidence did not pass (passed="
+                    f"{evidence.get('passed')!r}); refusing promotion"
+                )
+            if registry.environment == "demo" and evidence.get("backend") != "real":
+                raise ReleaseError(
+                    f"promote: demo promotion requires real-backed {kind} evidence, got "
+                    f"backend={evidence.get('backend')!r}"
                 )
 
         circuit = _read_circuit(registry)
-        if circuit.get("open") and _norm(circuit.get("bad_artifact_id")) == _norm(artifact_id):
+        if _circuit_blocks(circuit, artifact_id):
             raise ReleaseError(f"promote: circuit is open against {artifact_id}")
 
         previous = _read_channel(registry, "CURRENT")
@@ -366,9 +389,12 @@ def trip_circuit(
 def resolve_channel(registry: FileRegistry, channel: Channel) -> str | None:
     """Resolve a channel to its artifact id, or ``None`` if unset/disabled.
 
-    For ``CURRENT`` this also honors the circuit breaker: if the breaker is open against
-    the very artifact ``CURRENT`` names, serving must not use it, so ``None`` is
-    returned. A ``null`` artifact pointer (serving disabled) also resolves to ``None``.
+    For ``CURRENT`` this also honors the circuit breaker, artifact-scoped: the breaker
+    disables serving only when it is open against the very artifact ``CURRENT`` names (or
+    when its state is open-but-unattributable/unreadable, which fails closed). A breaker
+    open against some OTHER artifact — e.g. after a rollback moved ``CURRENT`` back to a
+    good release — does not disable this one. A ``null`` artifact pointer (serving
+    disabled) also resolves to ``None``.
     """
     record = _read_channel(registry, channel)
     if record is None:
@@ -378,6 +404,6 @@ def resolve_channel(registry: FileRegistry, channel: Channel) -> str | None:
         return None
     if channel == "CURRENT":
         circuit = _read_circuit(registry)
-        if circuit.get("open") and _norm(artifact_id) == _norm(circuit.get("bad_artifact_id")):
+        if _circuit_blocks(circuit, artifact_id):
             return None
     return artifact_id

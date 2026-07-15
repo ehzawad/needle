@@ -50,8 +50,10 @@ def normalize_decision(raw: Mapping[str, Any]) -> GateDecision:
 
     Fail-closed: an unknown/missing disposition becomes ``ABSTAIN``; a card id is kept
     only for an ``ANSWER`` (a CLARIFY/ABSTAIN carries no answered card); candidates are
-    coerced to a list of strings; the reason is stringified. Tolerant of a non-mapping
-    input so a caller wrapping a flaky gate never explodes here.
+    coerced to a list of strings; the reason is stringified. An optional, validated
+    ``policy_action`` marker (e.g. a bare-PIN ``downgrade_answer_to_clarify``) is
+    PRESERVED so serving/observability can see why a decision was made safer. Tolerant of
+    a non-mapping input so a caller wrapping a flaky gate never explodes here.
     """
     data: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
     disposition = data.get("disposition")
@@ -67,11 +69,14 @@ def normalize_decision(raw: Mapping[str, Any]) -> GateDecision:
     reason = data.get("reason", "")
     if not isinstance(reason, str):
         reason = str(reason)
+    raw_action = data.get("policy_action")
+    policy_action = raw_action if (isinstance(raw_action, str) and raw_action) else None
     decision: GateDecision = {
         "disposition": disposition,
         "card_id": card_id,
         "candidates": candidates,
         "reason": reason,
+        "policy_action": policy_action,
     }
     return decision
 

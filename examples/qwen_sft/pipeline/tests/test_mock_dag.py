@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
@@ -91,6 +92,26 @@ class MockDagTest(unittest.TestCase):
                              f"expected {stage} to be reused from cache on re-run")
         # The second generation records the first as its parent (explicit lineage).
         self.assertEqual(second["current_before"], first["artifact_id"])
+
+    def test_channel_write_failure_blocks_promotion(self) -> None:
+        """A staging-channel (SHADOW/CANARY) write failure must BLOCK the run, not be
+        swallowed into a silent promotion. With set_channel raising, the run is blocked at
+        SHADOW, PROMOTE never runs, and CURRENT stays unset."""
+        with mock.patch.object(release, "set_channel",
+                               side_effect=RuntimeError("channel write boom")):
+            summary = dag.run_pipeline(
+                self.config, backend="mock", promote_current=True, actor="ci")
+
+        self.assertEqual(summary["status"], "blocked", summary.get("block_reason"))
+        self.assertFalse(summary["promoted"])
+        self.assertIn("channel write", summary.get("block_reason", ""))
+        # The SHADOW stage is where the write is first attempted; it must be marked blocked.
+        self.assertEqual(summary["stages"]["SHADOW"]["status"], "blocked")
+        # Promotion never ran, and CURRENT was never set.
+        self.assertNotIn("PROMOTE", summary["stages"])
+        self.assertIsNone(summary["current_artifact_id"])
+        registry = FileRegistry(self.config.state_root, environment="ci")
+        self.assertIsNone(release.resolve_channel(registry, "CURRENT"))
 
     def test_no_top_level_torch_import(self) -> None:
         """AST-scan every pipeline module: NONE may import torch/transformers at module
