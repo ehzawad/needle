@@ -99,8 +99,7 @@ def child_preflight() -> DeviceReport:
 def assert_model_devices(model: object) -> None:
     """Belt-and-suspenders: after the model loads, refuse any CUDA placement other than
     logical cuda:0 (with one visible device, only cuda:0 can exist — this catches an
-    accidental explicit .to('cuda:1')."""
-    import torch  # noqa: PLC0415
+    accidental explicit .to('cuda:1'). Reads only tensor.device, so needs no torch import."""
     for tensor in list(getattr(model, "parameters", lambda: [])()) + \
             list(getattr(model, "buffers", lambda: [])()):
         dev = tensor.device

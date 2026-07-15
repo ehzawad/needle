@@ -8,7 +8,7 @@
   },
   "frozen": {
     "scope_bot_sha256": "a95dc0cf19d3768d064d1ae670bde4d851fc790c973812ed60e76b66a5f0eff4",
-    "scope_policy_sha256": "674e61133a7074d19351ca2f3564ac91d88635663d4deec1966583542233ea43",
+    "scope_policy_sha256": "5e15715c0a050a8896fe7e2bd5520e292fec882382485c7587930cf6c05c623b",
     "eval_suite_sha256": "aed256523ed1def1414b77529782d8c3cad757b43bc08c717d0c14e0d04afd7e",
     "model_id": "Qwen/Qwen3-4B-Instruct-2507",
     "model_revision": "cdbee75f17c01a7cc42f958dc650907174af0554"

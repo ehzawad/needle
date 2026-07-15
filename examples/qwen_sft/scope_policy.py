@@ -82,19 +82,6 @@ def enforce_policy(query: str, gate: dict, by_id: dict) -> dict:
     return gate  # all discriminators resolved in-scope (or none) -> keep ANSWER
 
 
-def all_out_of_scope_cues(cards: list[dict]) -> dict[str, list[str]]:
-    """Map card_id -> its declared out-of-scope cues, so downstream signal mining
-    derives OOD vocabulary from the CARDS (versioned) rather than a hard-coded regex."""
-    out: dict[str, list[str]] = {}
-    for c in cards:
-        cues = []
-        for d in c.get("required_discriminators", []):
-            cues += d.get("out_of_scope_cues", [])
-        if cues:
-            out[c["intent_id"]] = cues
-    return out
-
-
 def query_hits_ood_cue(query: str, cards: list[dict]) -> str | None:
     """Return the first out-of-scope cue (from ANY card) present in the query, else None.
     Card-derived replacement for a hand-maintained OOD keyword list."""

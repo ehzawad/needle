@@ -26,6 +26,10 @@ bash setup_env.sh          # one-time: pinned inference venv (.venv-qlora)
 
 # the pipeline on the real model (A5000-pinned by the guard; no CUDA env needed)
 .venv-qlora/bin/python -m pipeline run --config pipeline/config.demo.json --state .pipeline-a5000 --backend real --promote --actor demo
+
+# serve the promoted model over HTTP (real: guards onto the A5000, closes the feedback loop)
+.venv-qlora/bin/python -m pipeline serve --config pipeline/config.demo.json --state .pipeline-a5000 --http 127.0.0.1:8080 --backend real
+curl -s :8080/respond -d '{"query":"How do I add my card to Apple Pay?"}'
 ```
 
 ## File map

@@ -175,6 +175,22 @@ def _load_current_evidence(registry: FileRegistry) -> list[dict[str, Any]]:
     return evidence
 
 
+def _drift_alerts(config: Any) -> list:
+    """Compute conservative drift alerts from the served conversation log (older half vs
+    newer half). Returns [] until there are >= drift.min_samples turns in each window —
+    which is the honest behavior at demo volume, but it IS a live caller of detect_drift."""
+    from feedback_log import read_sessions
+
+    from pipeline.observability import detect_drift
+    turns = [t for session in read_sessions().values() for t in session if t.get("disposition")]
+    turns.sort(key=lambda t: t.get("ts", ""))
+    mid = len(turns) // 2
+    return list(detect_drift(
+        turns[:mid], turns[mid:],
+        min_samples=config.drift.min_samples,
+        max_rate_delta=config.drift.max_disposition_rate_delta))
+
+
 def _cmd_dashboard(args: argparse.Namespace) -> int:
     config = _load(args)
     registry = _registry(config)
@@ -183,7 +199,7 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     release_view.setdefault("channel", "CURRENT")
     output = registry.observability_dir / "dashboard.html"
     render_dashboard(output, release=release_view,
-                     evidence=_load_current_evidence(registry), alerts=[])
+                     evidence=_load_current_evidence(registry), alerts=_drift_alerts(config))
     _print({"dashboard": str(output)})
     return 0
 
@@ -205,23 +221,50 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     cards_path = registry.artifact_dir(artifact_id) / "files" / "cards.json"
     cards = json.loads(cards_path.read_text("utf-8"))
-    cases = load_eval50_cases(config.eval_source_path)
-    gate = policy_wrapped_gate(make_mock_gate(cases), cards)
-    respond = dag._mock_respond(gate)
+    backend = getattr(args, "backend", "mock")
+
+    if backend == "real":
+        # A leaf model-serving process (like gpu_worker): guard the A5000 IN THIS process
+        # BEFORE any torch import, then load the promoted candidate's real bot and serve it.
+        import os
+        from pipeline.device_guard import (
+            assert_model_devices, child_preflight, pinned_environment,
+        )
+        pinned = pinned_environment()
+        os.environ.update({k: pinned[k] for k in
+                           ("CUDA_DEVICE_ORDER", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES")})
+        device = child_preflight()  # fail closed unless exactly the A5000 is visible
+        from feedback_log import TurnLogger
+        from pipeline.adapters import load_real_bot, real_gate, real_respond
+        bot = load_real_bot(registry.artifact_dir(artifact_id))
+        assert_model_devices(getattr(bot, "m", bot))
+        gate = real_gate(bot, cards)
+        respond = real_respond(bot)
+        # Real serving closes the feedback loop: turns land in logs/conversations.jsonl,
+        # which mine_signals/adapter.learn later turn into the next candidate's exemplars.
+        turn_logger: object = TurnLogger()
+        backend_label = f"real, {device.name}"
+    else:
+        cases = load_eval50_cases(config.eval_source_path)
+        gate = policy_wrapped_gate(make_mock_gate(cases), cards)
+        respond = dag._mock_respond(gate)
+        turn_logger = dag._MemoryTurnLogger()
+        backend_label = "mock"
+
     event_path = registry.observability_dir / "events.jsonl"
     serve = serving.make_server(
         artifact_id=artifact_id, cards=cards, gate=gate, respond=respond,
-        turn_logger=dag._MemoryTurnLogger(), event_path=event_path)
+        turn_logger=turn_logger, event_path=event_path)
 
     def _healthz() -> dict[str, Any]:
         return {"ok": True, "artifact_id": artifact_id, "channel": "CURRENT",
-                "circuit_open": dag._circuit_open(registry), "backend": "mock"}
+                "circuit_open": dag._circuit_open(registry), "backend": backend}
 
     host, port = parse_host_port(args.http)
     server = build_http_server(host, port, serve=serve, gate=gate,
                                artifact_id=artifact_id, healthz=_healthz)
     print(f"serving CURRENT {artifact_id} on http://{host}:{port} "
-          f"(mock ServeFn; Ctrl-C to stop)", file=sys.stderr)
+          f"({backend_label} ServeFn; Ctrl-C to stop)", file=sys.stderr)
     serve_forever(server)
     return 0
 
@@ -284,6 +327,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_serve = sub.add_parser("serve", help="start the HTTP serving microservice")
     _add_state_args(p_serve)
     p_serve.add_argument("--http", required=True, help="HOST:PORT to bind (e.g. 127.0.0.1:8080)")
+    p_serve.add_argument("--backend", choices=("mock", "real"), default="mock",
+                         help="mock (CPU, default/CI) or real (loads Qwen on the A5000, closes the feedback loop)")
     p_serve.set_defaults(func=_cmd_serve)
 
     return parser

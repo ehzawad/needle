@@ -102,18 +102,21 @@ cd examples/qwen_sft
 # full DAG on the REAL model (A5000-pinned by the guard; no CUDA env needed)
 .venv-qlora/bin/python -m pipeline run --config pipeline/config.demo.json --state .pipeline-a5000 --backend real --promote --actor a5000-demo
 
-# the HTTP serving microservice (currently a MOCK-gate boundary demo — see note below)
-.venv-qlora/bin/python -m pipeline serve --config pipeline/config.demo.json --state .pipeline-a5000 --http 127.0.0.1:8080
-curl -s :8080/gate -d '{"query":"How do I change my PIN?"}'      # -> CLARIFY
-curl -s :8080/gate -d '{"query":"How do I change my SIM PIN?"}'  # -> ABSTAIN
+# the HTTP serving microservice — mock (CPU) or real (loads Qwen on the A5000)
+.venv-qlora/bin/python -m pipeline serve --config pipeline/config.demo.json --state .pipeline-a5000 --http 127.0.0.1:8080 --backend mock
+.venv-qlora/bin/python -m pipeline serve --config pipeline/config.demo.json --state .pipeline-a5000 --http 127.0.0.1:8080 --backend real
+curl -s :8080/gate    -d '{"query":"How do I change my PIN?"}'       # -> CLARIFY
+curl -s :8080/gate    -d '{"query":"How do I change the PIN on my SIM card?"}'  # -> ABSTAIN
+curl -s :8080/respond -d '{"query":"How do I add my card to Apple Pay?"}'       # -> grounded ANSWER
 ```
 
-> **HTTP serving is a mock-gate boundary demo, not real-model serving.** The endpoint
-> exercises the serving *contract* (fail-closed dual-decision, `/healthz`, JSON in/out)
-> with a deterministic mock gate; it does **not** load Qwen. Real model work only ever
-> happens inside the guarded `gpu_worker` (offline/shadow/canary evidence). Wiring the
-> HTTP path to real worker-backed serving + persistent `TurnLogger` is a known gap, left
-> open deliberately under "remove redundancy, add no features".
+> **Two serving backends.** `--backend mock` (default/CI) exercises the serving *contract*
+> (fail-closed dual-decision, `/healthz`, JSON in/out) with a deterministic gate — no GPU.
+> `--backend real` makes it a genuine model-serving microservice: the serve process guards
+> itself onto the A5000 (`child_preflight`, fail-closed) *before* importing torch, loads
+> the promoted candidate's real bot, and serves real gate + grounded generation — **and it
+> logs each served turn to `logs/conversations.jsonl`, closing the feedback loop** back into
+> `mine_signals`/`adapter.learn` for the next candidate. Verified live on the A5000.
 
 State (`.pipeline-*/`) is a runtime artifact and git-ignored: `blobs/`, `artifacts/`,
 `evidence/`, `channels/{SHADOW,CANARY,CURRENT}`, `releases/history.jsonl`, `circuit.json`,
