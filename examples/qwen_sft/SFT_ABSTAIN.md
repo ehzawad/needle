@@ -1,5 +1,15 @@
 # Qwen3-4B refusal-aware SFT — generative bot that abstains out-of-scope
 
+> **PAUSED (challenger only).** A later Codex Council ruled against domain SFT for a
+> *file-defined* scope: baking domain facts/boundaries into weights fights the
+> "domain is an editable file" requirement. The chosen architecture is in
+> **[`RAG_SCOPE.md`](RAG_SCOPE.md)** — a training-free LLM scope-gate over the scope
+> file + grounded generation (demonstrated in `scope_bot.py`). This trainer stays
+> only as an experimental challenger, or for a small *gate-only* head if the
+> decisive experiment proves it earns a ≥10-point hard-OOD gain. Its smoke/resume
+> path is proven and reusable.
+
+
 Jettisons the E5 router. A single **generative** model (SFT'd Qwen3-4B) answers
 in-scope questions by rephrasing approved facts, and says *"I don't know / out of
 scope"* on anything outside its SFT domain — including semantic doppelgängers.

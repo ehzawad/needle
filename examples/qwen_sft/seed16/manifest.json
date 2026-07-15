@@ -1,0 +1,35 @@
+{
+  "intents": [
+    "card_arrival",
+    "change_pin",
+    "bill_balance",
+    "international_fees",
+    "report_lost_card",
+    "transfer",
+    "card_declined",
+    "reset_password",
+    "activate_card",
+    "atm_locator",
+    "dispute_charge",
+    "spending_limit",
+    "statement_download",
+    "add_to_wallet",
+    "travel_notice",
+    "update_contact"
+  ],
+  "n_intents_with_data": 16,
+  "empty_intents": [],
+  "train": {
+    "answer": 160,
+    "hard_refusal": 76,
+    "far_refusal": 48
+  },
+  "validation": {
+    "answer": 32,
+    "hard_refusal": 16,
+    "far_refusal": 16
+  },
+  "train_total": 284,
+  "val_total": 64,
+  "needs_full_human_review": true
+}

@@ -1,0 +1,422 @@
+[
+  {
+    "intent_id": "card_arrival",
+    "supported_goal": "Help the customer check the delivery status and expected arrival of a physical Northwind card that has already been issued and mailed.",
+    "included": [
+      "physical debit or credit card in the mail",
+      "delivery tracking status",
+      "estimated arrival date",
+      "shipping method (standard vs expedited)",
+      "mailing address the card was sent to"
+    ],
+    "excluded": [
+      "activating the card once it arrives",
+      "reporting a lost or stolen card and its replacement",
+      "ordering a new/virtual card",
+      "changing the mailing address"
+    ],
+    "capability": "requires_user_context",
+    "key_facts": [
+      "Newly issued cards ship by standard mail and arrive in 5-7 business days; track status in the app under Cards > Track delivery.",
+      "Expedited shipping is available for $25 and delivers in 2 business days.",
+      "Cards are mailed to the address on file; if it has not arrived after 10 business days, request a replacement via the 24/7 line."
+    ],
+    "confusable_intents": [
+      "activate_card",
+      "report_lost_card"
+    ]
+  },
+  {
+    "intent_id": "change_pin",
+    "supported_goal": "Guide the customer through changing the 4-digit PIN on their Northwind debit or credit card.",
+    "included": [
+      "4-digit card PIN",
+      "debit card PIN",
+      "credit card PIN",
+      "changing PIN at an ATM",
+      "changing PIN in the app"
+    ],
+    "excluded": [
+      "mobile-app login password",
+      "phone SIM PIN",
+      "card CVV / security code",
+      "one-time passcode (OTP)"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Change your 4-digit card PIN in the app under Cards > Manage > Change PIN, or at any Northwind ATM.",
+      "The new PIN takes effect immediately and there is no fee.",
+      "The card PIN is separate from your mobile-app login password and from any OTP code."
+    ],
+    "confusable_intents": [
+      "reset_password",
+      "activate_card"
+    ]
+  },
+  {
+    "intent_id": "bill_balance",
+    "supported_goal": "Show the customer their current credit-card statement balance and when that balance is due.",
+    "included": [
+      "credit card statement balance",
+      "payment due date",
+      "minimum payment due",
+      "statement closing date"
+    ],
+    "excluded": [
+      "available credit / credit limit",
+      "current unbilled running balance",
+      "downloading the statement PDF",
+      "making the payment / transferring funds to pay it"
+    ],
+    "capability": "requires_user_context",
+    "key_facts": [
+      "View your statement balance and due date in the app under Accounts > Credit Card > Statement.",
+      "The statement closes monthly on your closing date and payment is due 21 days later (grace period).",
+      "The minimum payment is the greater of 2% of the statement balance or $25."
+    ],
+    "confusable_intents": [
+      "statement_download",
+      "transfer"
+    ]
+  },
+  {
+    "intent_id": "international_fees",
+    "supported_goal": "Explain the foreign-exchange fee Northwind charges when the card is used for international or foreign-currency transactions.",
+    "included": [
+      "foreign transaction fee",
+      "3% FX fee",
+      "foreign-currency purchase",
+      "international online merchant charge"
+    ],
+    "excluded": [
+      "out-of-network ATM fee",
+      "wire-transfer currency conversion",
+      "travel notice to prevent blocks",
+      "travel rewards or insurance"
+    ],
+    "capability": "static_fact",
+    "key_facts": [
+      "Northwind charges a 3% foreign transaction fee on the USD amount of any international card purchase or foreign-currency transaction.",
+      "The fee is waived on Northwind Global Checking premium accounts.",
+      "This FX fee is separate from any out-of-network ATM fee."
+    ],
+    "confusable_intents": [
+      "travel_notice",
+      "atm_locator"
+    ]
+  },
+  {
+    "intent_id": "report_lost_card",
+    "supported_goal": "Help the customer report a lost or stolen Northwind card, freeze it, and get a replacement.",
+    "included": [
+      "lost card",
+      "stolen card",
+      "immediate card freeze",
+      "replacement card",
+      "24/7 fraud hotline"
+    ],
+    "excluded": [
+      "disputing a specific fraudulent charge",
+      "a card that was merely declined at a merchant",
+      "forgetting the PIN",
+      "tracking an already-ordered card"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Report a lost or stolen card 24/7 via the app (Cards > Report lost/stolen) or the 1-800-NORTHWIND hotline; the card is frozen immediately.",
+      "A free replacement arrives in 5-7 business days, or in 2 business days for $25 expedited.",
+      "Stolen cards are reissued with a new card number; a merely misplaced card can instead be temporarily frozen and unfrozen in the app."
+    ],
+    "confusable_intents": [
+      "dispute_charge",
+      "card_declined",
+      "card_arrival"
+    ]
+  },
+  {
+    "intent_id": "transfer",
+    "supported_goal": "Help the customer move money between their own Northwind accounts (e.g., checking to savings).",
+    "included": [
+      "internal transfer between own accounts",
+      "checking to savings",
+      "savings to checking",
+      "instant transfer"
+    ],
+    "excluded": [
+      "external/ACH transfer to another bank",
+      "sending money to another person (Zelle)",
+      "wire transfer",
+      "paying a credit card bill from an outside account"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Transfers between your own Northwind accounts are instant and free via Transfer > Between my accounts.",
+      "There is no transfer fee and no dollar cap beyond your available balance.",
+      "Transfers to other banks (ACH) or to other people are a separate service and are not covered here."
+    ],
+    "confusable_intents": [
+      "bill_balance"
+    ]
+  },
+  {
+    "intent_id": "card_declined",
+    "supported_goal": "Explain why a specific card transaction was declined at a merchant and what the customer can do about it.",
+    "included": [
+      "declined purchase",
+      "decline reason",
+      "insufficient funds",
+      "exceeded daily limit",
+      "fraud or travel block"
+    ],
+    "excluded": [
+      "reporting the card lost or stolen",
+      "disputing a charge that did go through",
+      "changing the spending limit itself",
+      "setting a travel notice"
+    ],
+    "capability": "requires_user_context",
+    "key_facts": [
+      "Common decline reasons are insufficient funds, exceeding the daily spending limit, an unactivated or expired card, an incorrect PIN, or a fraud/travel block.",
+      "The specific reason appears in the app's transaction notifications; resolve it by adjusting the limit, activating the card, or setting a travel notice.",
+      "A declined card is not the same as a lost/stolen card and does not need to be reported unless you suspect fraud."
+    ],
+    "confusable_intents": [
+      "report_lost_card",
+      "spending_limit",
+      "travel_notice"
+    ]
+  },
+  {
+    "intent_id": "reset_password",
+    "supported_goal": "Guide the customer through resetting the login password for the Northwind mobile app.",
+    "included": [
+      "mobile-app login password",
+      "forgot password flow",
+      "OTP identity verification",
+      "setting a new password"
+    ],
+    "excluded": [
+      "4-digit card PIN",
+      "transaction one-time passcode",
+      "security questions",
+      "username / login-ID recovery"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Reset your mobile-app login password from the login screen via \"Forgot password.\"",
+      "Verify your identity with a one-time passcode sent to your registered phone or email, then set a new password.",
+      "This is the app login password, not your 4-digit card PIN."
+    ],
+    "confusable_intents": [
+      "change_pin",
+      "update_contact"
+    ]
+  },
+  {
+    "intent_id": "activate_card",
+    "supported_goal": "Guide the customer through activating a newly received Northwind card so it can be used.",
+    "included": [
+      "new card activation",
+      "activation methods (app, phone, ATM)",
+      "activation window",
+      "first-time use"
+    ],
+    "excluded": [
+      "tracking a card still in the mail",
+      "adding the card to a mobile wallet",
+      "changing the PIN",
+      "reset of the app password"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Activate a newly received card in the app (Cards > Activate), by calling 1-800-NORTHWIND, or at any Northwind ATM.",
+      "Activate within 30 days of receiving the card.",
+      "The card must be activated before it can be used or added to a mobile wallet."
+    ],
+    "confusable_intents": [
+      "card_arrival",
+      "add_to_wallet"
+    ]
+  },
+  {
+    "intent_id": "atm_locator",
+    "supported_goal": "Help the customer find a nearby in-network, surcharge-free ATM.",
+    "included": [
+      "in-network ATM",
+      "Allpoint network ATM",
+      "surcharge-free ATM",
+      "ATM near me / by ZIP code",
+      "ATM map"
+    ],
+    "excluded": [
+      "branch/office locator",
+      "the daily ATM cash-withdrawal limit",
+      "the foreign transaction fee",
+      "depositing cash"
+    ],
+    "capability": "requires_live_tool",
+    "key_facts": [
+      "Find surcharge-free in-network ATMs in the app under Locations > ATM finder, using your current location or a ZIP code.",
+      "Northwind and Allpoint together offer 55,000+ surcharge-free ATMs.",
+      "Using an out-of-network ATM incurs a $3 Northwind fee."
+    ],
+    "confusable_intents": [
+      "international_fees",
+      "spending_limit"
+    ]
+  },
+  {
+    "intent_id": "dispute_charge",
+    "supported_goal": "Help the customer dispute an unauthorized or incorrect charge that has already POSTED to their account.",
+    "included": [
+      "posted transaction dispute",
+      "unauthorized charge",
+      "incorrect amount charged",
+      "provisional credit",
+      "chargeback"
+    ],
+    "excluded": [
+      "pending (not-yet-posted) transactions",
+      "reporting the card lost or stolen",
+      "a normal merchant refund/return",
+      "cancelling a recurring subscription"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Dispute an unauthorized or incorrect POSTED charge in the app (open the transaction > Dispute) or by phone; only posted, not pending, charges can be disputed.",
+      "File within 60 days of the statement that shows the charge.",
+      "Provisional credit is issued within 10 business days and the investigation can take up to 90 days."
+    ],
+    "confusable_intents": [
+      "report_lost_card",
+      "card_declined"
+    ]
+  },
+  {
+    "intent_id": "spending_limit",
+    "supported_goal": "Help the customer view or change the daily purchase limit on their card.",
+    "included": [
+      "daily purchase limit",
+      "debit spending limit",
+      "adjusting the limit",
+      "viewing the current limit"
+    ],
+    "excluded": [
+      "daily ATM cash-withdrawal limit",
+      "credit line / credit limit increase",
+      "why a specific purchase was declined",
+      "the statement balance"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "View or change your card's daily purchase limit in the app under Cards > Spending limit.",
+      "The default daily purchase limit is $2,000 and can be set anywhere from $0 to $5,000; changes apply immediately.",
+      "The daily ATM cash-withdrawal limit is a separate setting (default $500)."
+    ],
+    "confusable_intents": [
+      "card_declined",
+      "atm_locator"
+    ]
+  },
+  {
+    "intent_id": "statement_download",
+    "supported_goal": "Help the customer download a monthly account statement as a PDF file.",
+    "included": [
+      "monthly statement PDF",
+      "downloading a statement",
+      "statement history",
+      "e-statement document"
+    ],
+    "excluded": [
+      "viewing the current statement balance",
+      "tax documents (e.g., 1099)",
+      "disputing a transaction on the statement",
+      "paper statement mailing"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Download a monthly statement as a PDF in the app under Accounts > Statements > Download PDF, or via online banking.",
+      "Statements are available for the past 84 months (7 years) and there is no fee.",
+      "This delivers the PDF document, which is different from viewing your current statement balance."
+    ],
+    "confusable_intents": [
+      "bill_balance"
+    ]
+  },
+  {
+    "intent_id": "add_to_wallet",
+    "supported_goal": "Guide the customer through adding their Northwind card to Apple Pay or Google Pay.",
+    "included": [
+      "Apple Pay",
+      "Google Pay",
+      "mobile wallet setup",
+      "tokenized card"
+    ],
+    "excluded": [
+      "activating the physical card",
+      "ordering a virtual card",
+      "setting the card PIN",
+      "adding the card to a merchant app"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Add your card to Apple Pay or Google Pay from the app (Cards > Add to Apple Pay / Google Pay) or directly in the wallet app.",
+      "The physical card must be activated first.",
+      "The wallet stores a tokenized card number and no additional fee applies."
+    ],
+    "confusable_intents": [
+      "activate_card"
+    ]
+  },
+  {
+    "intent_id": "travel_notice",
+    "supported_goal": "Help the customer set a travel notice so their cards keep working abroad without being blocked for suspected fraud.",
+    "included": [
+      "travel notice",
+      "travel plans / destinations",
+      "travel dates",
+      "using the card abroad"
+    ],
+    "excluded": [
+      "the 3% foreign transaction fee",
+      "international ATM fees",
+      "travel rewards or insurance",
+      "why a card was declined after travel started"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Set a travel notice in the app under Cards > Travel notice, entering your destinations and travel dates.",
+      "Set it at least 3 days before you travel to prevent the card from being blocked abroad for suspected fraud.",
+      "A travel notice does not waive the 3% foreign transaction fee."
+    ],
+    "confusable_intents": [
+      "international_fees",
+      "card_declined"
+    ]
+  },
+  {
+    "intent_id": "update_contact",
+    "supported_goal": "Help the customer update the phone number or email address on their Northwind account.",
+    "included": [
+      "phone number",
+      "email address",
+      "contact information",
+      "notification contact details"
+    ],
+    "excluded": [
+      "mailing/home address change",
+      "name change",
+      "resetting the app login password",
+      "updating card details"
+    ],
+    "capability": "procedural",
+    "key_facts": [
+      "Update your phone number or email in the app under Profile > Contact info.",
+      "Email changes take effect immediately; phone-number changes require a one-time passcode to verify.",
+      "Mailing-address and name changes are handled separately, not through this flow."
+    ],
+    "confusable_intents": [
+      "reset_password"
+    ]
+  }
+]
