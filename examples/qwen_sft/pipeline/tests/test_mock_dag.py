@@ -10,6 +10,9 @@ gate, and cross-check runs on the deterministic mock gate.
 from __future__ import annotations
 
 import ast
+import dataclasses
+import json
+import re
 import sys
 import tempfile
 import unittest
@@ -112,6 +115,35 @@ class MockDagTest(unittest.TestCase):
         self.assertIsNone(summary["current_artifact_id"])
         registry = FileRegistry(self.config.state_root, environment="ci")
         self.assertIsNone(release.resolve_channel(registry, "CURRENT"))
+
+    def test_drift_alert_reaches_dashboard_and_metric(self) -> None:
+        """A drift-inducing configured live feedback log must surface in the DAG-rendered
+        dashboard AND as a nonzero scope_drift_alerts gauge — drift is now wired into the
+        DAG observability, not just the CLI. Drift stays informational: the run still
+        promotes (drift never gates)."""
+        live = Path(self._tmp.name) / "conversations.jsonl"
+        lines = []
+        for i in range(120):  # 60 older ANSWER + 60 newer ABSTAIN -> disposition drift
+            disp = "ANSWER" if i < 60 else "ABSTAIN"
+            lines.append(json.dumps({
+                "session_id": f"drift-{i}", "turn": 1, "query": "q", "disposition": disp,
+                "card_id": None, "candidates": [], "reason": "", "reply": "",
+                "ts": f"2026-07-16T00:00:00.{i:03d}",
+            }))
+        live.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        config = dataclasses.replace(self.config, feedback_logs_path=live)
+
+        summary = dag.run_pipeline(config, backend="mock", promote_current=True, actor="ci")
+        self.assertEqual(summary["status"], "promoted", summary.get("block_reason"))
+
+        obs = FileRegistry(config.state_root, environment="ci").observability_dir
+        metrics_text = (obs / "metrics.prom").read_text(encoding="utf-8")
+        match = re.search(r"^scope_drift_alerts (\d+)$", metrics_text, re.MULTILINE)
+        self.assertIsNotNone(match, metrics_text)
+        self.assertGreater(int(match.group(1)), 0)  # nonzero active-alert gauge
+        # The same computed alerts reach the rendered dashboard.
+        dashboard = (obs / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("does not gate promotion", dashboard)
 
     def test_no_top_level_torch_import(self) -> None:
         """AST-scan every pipeline module: NONE may import torch/transformers at module

@@ -113,7 +113,9 @@ def main():
     for cat, q, d, card, v in rows:
         lines.append(f"[{cat:11}] {v:22} got={d:8} card={card or '-':16} | {q[:60]}")
     over_clar = sum(1 for c, q, d, card, v in rows if c == "in_scope" and d == "CLARIFY")
-    under_clar = amb_total - amb_clarify
+    # under-clarify = ambiguous rows that were GUESSED (ANSWER); an ambiguous ABSTAIN is
+    # over-caution, not a guess, so it must not be counted here.
+    under_clar = sum(1 for c, q, d, card, v in rows if c == "ambiguous" and d == "ANSWER")
     summary = [
         "",
         "=" * 78,

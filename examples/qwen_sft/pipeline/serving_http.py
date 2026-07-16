@@ -2,27 +2,34 @@
 
 Real-world analog: a KServe / Triton inference endpoint (or an Envoy-fronted model
 service) exposing the gate/respond contract over HTTP. It is deliberately the ONE
-network surface in this otherwise file-backed modular monolith, and it is control-plane /
-CPU only: it wraps an already-built :data:`~pipeline.contracts.ServeFn` (from
-:func:`pipeline.serving.make_server`) plus its gate. For a mock/CI release both callables
-are model-free; for a real release the injected callables would route model work through
-the guarded GPU worker — this HTTP process itself never imports torch.
+network surface in this otherwise file-backed modular monolith. For a mock/CI release the
+injected gate/serve callables are model-free and this process stays CPU-only; for a real
+release the SAME process loads the promoted model in-process after ``cli._cmd_serve`` pins
+the A5000 and runs the device preflight (this HTTP module itself never imports torch — the
+model lives behind the injected callables). Both ``/gate`` and ``/respond`` share one
+thread-safe :class:`~pipeline.serving.TurnRecorder`, so turns are per-session and
+monotonic across the two routes and every served turn is logged exactly once.
 
-Routes (JSON in/out):
+Routes (JSON in/out). Each POST accepts an optional ``session_id``; when absent the server
+generates one and echoes it (plus the assigned ``turn``) so a client can keep a
+conversation together. Anonymous requests are never merged into one global session.
 
-  * ``POST /gate``     ``{"query": ...}`` -> the policy-wrapped gate decision
-  * ``POST /respond``  ``{"query": ...}`` -> the cross-checked :class:`TurnResult`
-  * ``GET  /healthz``  -> liveness + the served artifact id + circuit state
+  * ``POST /gate``     ``{"query": ..., "session_id"?: ...}`` -> the policy-wrapped gate
+    decision (logged as a gate-only turn; never runs generation)
+  * ``POST /respond``  ``{"query": ..., "session_id"?: ...}`` -> the cross-checked
+    :class:`TurnResult`
+  * ``GET  /healthz``  -> liveness + served artifact id + circuit state + device report
 """
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, is_dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from pipeline.contracts import GateFn, ServeFn
+from pipeline.serving import TurnRecorder
 
 __all__ = ["build_http_server", "serve_forever", "parse_host_port"]
 
@@ -53,19 +60,28 @@ def _as_json(value: Any) -> Any:
     return value
 
 
+_BAD_LENGTH = object()  # sentinel: non-numeric Content-Length -> HTTP 400
+
+
 def build_http_server(
     host: str,
     port: int,
     *,
-    serve: ServeFn,
-    gate: GateFn,
+    serve: Callable[..., Any],
+    gate: Callable[..., Any],
+    recorder: TurnRecorder,
     artifact_id: str | None,
     healthz: Callable[[], Mapping[str, Any]] | None = None,
 ) -> ThreadingHTTPServer:
     """Build (but do not start) a :class:`ThreadingHTTPServer` over ``serve``/``gate``.
 
-    ``serve`` is the frozen 7-step :data:`ServeFn`; ``gate`` is its policy-wrapped safe
-    gate (what ``/gate`` returns). ``healthz`` supplies the liveness payload.
+    ``serve`` is the session-aware frozen 7-step server; ``gate`` is the logged,
+    policy-wrapped safe gate (what ``/gate`` returns) — both accept ``(query, session_id,
+    turn)``. ``recorder`` is the shared :class:`~pipeline.serving.TurnRecorder` that assigns
+    the per-session, monotonic turn number BEFORE dispatch, so ``/gate`` and ``/respond``
+    interleave into one sequence. ``healthz`` supplies the liveness payload (including the
+    device report). ``/respond`` is logged exactly once (by ``serve``); this HTTP layer adds
+    no second log.
     """
 
     def _health() -> Mapping[str, Any]:
@@ -88,8 +104,14 @@ def build_http_server(
             self.end_headers()
             self.wfile.write(data)
 
-        def _read_query(self) -> str | None:
-            length = int(self.headers.get("Content-Length") or 0)
+        def _read_request(self) -> Any:
+            """Return ``(query, session_id | None)``, ``None`` (bad/empty body), or
+            ``_BAD_LENGTH`` (non-numeric Content-Length)."""
+            raw_len = self.headers.get("Content-Length")
+            try:
+                length = int(raw_len) if raw_len not in (None, "") else 0
+            except (TypeError, ValueError):
+                return _BAD_LENGTH
             if length <= 0 or length > _MAX_BODY:
                 return None
             try:
@@ -99,7 +121,12 @@ def build_http_server(
             if not isinstance(payload, Mapping):
                 return None
             query = payload.get("query")
-            return query if isinstance(query, str) else None
+            if not isinstance(query, str):
+                return None
+            sid = payload.get("session_id")
+            if not isinstance(sid, str) or not sid:
+                sid = None
+            return (query, sid)
 
         def do_GET(self) -> None:  # noqa: N802 — stdlib handler naming
             if self.path.split("?", 1)[0] == "/healthz":
@@ -112,15 +139,27 @@ def build_http_server(
             if route not in ("/gate", "/respond"):
                 self._send(404, {"error": "not found", "path": self.path})
                 return
-            query = self._read_query()
-            if query is None:
+            parsed = self._read_request()
+            if parsed is _BAD_LENGTH:
+                self._send(400, {"error": "invalid Content-Length header"})
+                return
+            if parsed is None:
                 self._send(400, {"error": 'expected JSON body {"query": "<text>"}'})
                 return
+            query, session_id = parsed
+            if session_id is None:  # never merge anonymous requests into one session
+                session_id = "sess-" + uuid.uuid4().hex
+            # Assign the per-session monotonic turn ONCE here so /gate and /respond share
+            # one sequence; pass it down so neither route double-counts.
+            turn = recorder.next_turn(session_id)
             try:
                 if route == "/gate":
-                    self._send(200, dict(gate(query)))
+                    decision = gate(query, session_id, turn)
+                    body = {**dict(decision), "session_id": session_id, "turn": turn}
                 else:
-                    self._send(200, serve(query))
+                    result = serve(query, session_id, turn)
+                    body = {**_as_json(result), "session_id": session_id, "turn": turn}
+                self._send(200, body)
             except Exception as exc:  # never leak a stack trace; fail closed with 500.
                 self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
 

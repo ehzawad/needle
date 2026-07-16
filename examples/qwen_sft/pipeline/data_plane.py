@@ -54,6 +54,21 @@ def _blobref_dict(ref: BlobRef) -> dict[str, Any]:
     return {"sha256": ref.sha256, "bytes": ref.bytes, "media_type": ref.media_type}
 
 
+def _merge_jsonl(*chunks: bytes) -> bytes:
+    """Normalize + concatenate JSONL byte chunks into one newline-terminated log.
+
+    Blank lines are dropped and every non-empty line is preserved in order (bootstrap
+    first, then live), so the merged bytes are stable regardless of trailing-newline
+    quirks in the source files. The merged log is what MINE and SHADOW consume.
+    """
+    lines: list[str] = []
+    for chunk in chunks:
+        for line in chunk.decode("utf-8").splitlines():
+            if line.strip():
+                lines.append(line)
+    return ("\n".join(lines) + "\n").encode("utf-8") if lines else b""
+
+
 def validate_cards(cards: Sequence[Mapping[str, Any]]) -> None:
     """Validate the scope cards. Raises :class:`DataValidationError` on any violation.
 
@@ -206,11 +221,24 @@ def ingest(config: PipelineConfig, registry: FileRegistry) -> Mapping[str, Any]:
     except json.JSONDecodeError as exc:
         raise DataValidationError(f"ingest: cards is not valid JSON ({exc})") from exc
     validate_cards(cards)
+    # The bootstrap sample is always validated + bound. When a live feedback log is
+    # configured AND present, it is validated too and MERGED after the bootstrap so the
+    # exact turns served in production become the next run's mined + shadow input. The
+    # live file is optional: on the first deployment it does not exist yet, and the
+    # bootstrap alone is a valid run.
+    bootstrap_bytes = config.logs_path.read_bytes()
     turns = validate_conversation_jsonl(config.logs_path)
+    feedback_path = getattr(config, "feedback_logs_path", None)
+    live_bytes = b""
+    live_turns: tuple[dict[str, Any], ...] = ()
+    if feedback_path is not None and feedback_path.is_file():
+        live_turns = validate_conversation_jsonl(feedback_path)
+        live_bytes = feedback_path.read_bytes()
+    merged_log_bytes = _merge_jsonl(bootstrap_bytes, live_bytes) if live_bytes else bootstrap_bytes
 
     # 3. Content-address the inputs and the frozen sources.
     cards_blob = registry.put_blob(config.cards_path.read_bytes(), media_type="application/json")
-    logs_blob = registry.put_blob(config.logs_path.read_bytes(), media_type="application/jsonl")
+    logs_blob = registry.put_blob(merged_log_bytes, media_type="application/jsonl")
     source_blobs = {
         "scope_bot": registry.put_blob(scope_bot_path.read_bytes(), media_type="text/x-python"),
         "scope_policy": registry.put_blob(scope_policy_path.read_bytes(), media_type="text/x-python"),
@@ -237,11 +265,18 @@ def ingest(config: PipelineConfig, registry: FileRegistry) -> Mapping[str, Any]:
         "thresholds_sha256": sha256_bytes(canonical_json(thresholds)),
     }
 
-    # 5. Snapshot identity = content address of every bound input.
+    # 5. Snapshot identity = content address of every bound input. Both log SOURCE digests
+    # (bootstrap + live) are bound in addition to the merged blob so a new served turn in
+    # the live log changes the snapshot id, invalidating INGEST/MINE/BUILD downstream.
+    log_sources = {
+        "bootstrap_logs_sha256": sha256_bytes(bootstrap_bytes),
+        "live_logs_sha256": (sha256_bytes(live_bytes) if live_bytes else None),
+    }
     identity = {
         "environment": config.environment,
         "cards": _blobref_dict(cards_blob),
         "logs": _blobref_dict(logs_blob),
+        "log_sources": log_sources,
         "sources": {name: _blobref_dict(ref) for name, ref in source_blobs.items()},
         "runtime": runtime,
         "evaluation_contract": evaluation_contract,
@@ -254,10 +289,17 @@ def ingest(config: PipelineConfig, registry: FileRegistry) -> Mapping[str, Any]:
         "environment": config.environment,
         "cards": cards_blob,
         "logs": logs_blob,
+        "log_sources": log_sources,
         "sources": source_blobs,
         "runtime": runtime,
         "evaluation_contract": evaluation_contract,
         "cards_path": str(config.cards_path),
         "logs_path": str(config.logs_path),
-        "counts": {"cards": len(cards), "log_turns": len(turns)},
+        "feedback_logs_path": (str(feedback_path) if feedback_path is not None else None),
+        "counts": {
+            "cards": len(cards),
+            "log_turns": len(turns) + len(live_turns),
+            "bootstrap_turns": len(turns),
+            "live_turns": len(live_turns),
+        },
     }

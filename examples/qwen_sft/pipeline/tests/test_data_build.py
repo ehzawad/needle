@@ -172,6 +172,47 @@ class IngestTest(unittest.TestCase):
             with self.assertRaises(SourceFreezeError):
                 ingest(tampered, FakeRegistry())
 
+    def test_live_served_record_enters_snapshot_and_mining(self) -> None:
+        # A record served into the configured live feedback log is validated, MERGED with
+        # the bootstrap sample, and content-addressed into the snapshot's logs blob — which
+        # is exactly what MINE consumes. The bootstrap-alone case stays valid (CI's null
+        # path); here we point feedback_logs at a temp live file with one served turn.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            live = tmp_dir / "conversations.jsonl"
+            probe = "__live_served_probe_query__"
+            live.write_text(
+                json.dumps({
+                    "session_id": "live-session", "turn": 1, "query": probe,
+                    "disposition": "CLARIFY", "card_id": None, "candidates": [],
+                    "reason": "ambiguous", "reply": "which did you mean?",
+                    "kb_version": "1acfd6ce4a70", "ts": "2026-07-16T00:00:00+00:00",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            config = dataclasses.replace(
+                _config(tmp_dir / "state"), feedback_logs_path=live)
+            registry = FakeRegistry()
+            snapshot = ingest(config, registry)
+
+            # The live turn is in the merged logs blob (the snapshot's, and MINE's, input).
+            merged = registry.read_blob(snapshot["logs"]).decode("utf-8")
+            self.assertIn(probe, merged)
+            self.assertEqual(snapshot["counts"]["live_turns"], 1)
+            self.assertGreater(snapshot["counts"]["bootstrap_turns"], 0)
+            self.assertEqual(snapshot["feedback_logs_path"], str(live))
+
+            # MINE reads snapshot["logs"] — prove the exact live record reaches its input.
+            labels_blob = mine_labels(snapshot, registry)
+            self.assertIsInstance(labels_blob, BlobRef)
+            mined_input = registry.read_blob(snapshot["logs"]).decode("utf-8")
+            self.assertIn(probe, mined_input)
+
+            # A snapshot without the live file (bootstrap alone) differs -> a new served
+            # turn invalidates the snapshot id (and thus INGEST/MINE/BUILD downstream).
+            bootstrap_only = ingest(_config(tmp_dir / "state2"), FakeRegistry())
+            self.assertNotEqual(snapshot["snapshot_id"], bootstrap_only["snapshot_id"])
+
 
 class BuildFlowTest(unittest.TestCase):
     def _ingest(self, registry: FakeRegistry, state: Path):

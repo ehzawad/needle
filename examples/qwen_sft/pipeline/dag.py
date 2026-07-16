@@ -55,8 +55,9 @@ if TYPE_CHECKING:  # import-light: only for type checkers, no runtime coupling.
 __all__ = ["run_pipeline", "verify_run", "PipelineBlocked"]
 
 # Stage cache version. Bumps when a stage's semantics change, invalidating its cache
-# without touching another stage.
-_STAGE_VERSION = "1"
+# without touching another stage. Bumped to "2" for the explicit ambiguous_answers metric
+# + merged feedback-log ingestion, so evidence cached under the old schema cannot be reused.
+_STAGE_VERSION = "2"
 
 # A mined UNDER_CLARIFY at/above this confidence is treated as a safety regression on the
 # CURRENT release (matches mine_signals' 0.85 for an under-clarify). LEAK always trips.
@@ -70,11 +71,15 @@ _EVIDENCE_END = "===EVIDENCE_JSON_END==="
 
 
 class PipelineBlocked(RuntimeError):
-    """Raised internally when a gate stage blocks the run; carries the blocking result."""
+    """Raised internally when a gate stage blocks the run; carries the block reason.
 
-    def __init__(self, result: StageResult, reason: str) -> None:
+    The blocking :class:`StageResult` already lives in the run context (``ctx.results``)
+    and is persisted there; the exception only needs the human-readable reason for the
+    run summary, so it does not keep a redundant copy of the result.
+    """
+
+    def __init__(self, reason: str) -> None:
         super().__init__(reason)
-        self.result = result
         self.reason = reason
 
 
@@ -266,7 +271,7 @@ class _RunContext:
         self.emit(stage, "stage", "blocked", cache_key=cache_key,
                   artifact_id=dict(outputs).get("artifact_id"), counts=metrics,
                   error_code=error_code)
-        raise PipelineBlocked(result, reason)
+        raise PipelineBlocked(reason)
 
     def _persist(self, stage: str, result: StageResult, payload: dict[str, Any]) -> None:
         body = _stage_dict(result)
@@ -437,7 +442,8 @@ def _check_offline(metrics: Mapping[str, Any], promotion: Any) -> list[str]:
 
 def _offline_metric_view(offline: Mapping[str, Any]) -> dict[str, Any]:
     keys = ("harmful_answers", "harmful_total", "right_card_answers", "in_scope_total",
-            "wrong_card_answers", "ambiguous_clarifies", "ambiguous_total", "errors")
+            "wrong_card_answers", "ambiguous_clarifies", "ambiguous_answers",
+            "ambiguous_total", "errors")
     return {k: offline.get(k) for k in keys}
 
 
@@ -504,20 +510,31 @@ def _write_observability(ctx: _RunContext, *, artifact_id: str | None,
     registry = ctx.registry
     stage_runs = len(ctx.results)
     stage_failures = sum(1 for r in ctx.results.values() if r.status == "blocked")
+    # Drift is computed from the SAME configured live feedback log the CLI dashboard uses,
+    # via the shared observability loader — never split all logs indiscriminately, never
+    # CWD-relative. It is informational only and never gates promotion.
+    alerts = observability.load_drift_alerts(
+        ctx.config.feedback_logs_path,
+        min_samples=ctx.config.drift.min_samples,
+        max_rate_delta=ctx.config.drift.max_disposition_rate_delta,
+    )
     metrics: dict[str, int | float] = {
         "scope_pipeline_stage_runs_total": stage_runs,
         "scope_pipeline_stage_failures_total": stage_failures,
         "scope_registry_integrity_failures_total": ctx.integrity_failures,
         "scope_circuit_open": 1 if _circuit_open(registry) else 0,
-        "scope_drift_alerts_total": 0,
+        # Active-alert gauge (was a permanently-zero _total counter): the real count of
+        # conservative drift alerts observed on the configured live log this run.
+        "scope_drift_alerts": len(alerts),
     }
     if artifact_id and offline_metrics is not None:
         label = f'{{artifact_id="{artifact_id}",backend="{ctx.backend}"}}'
         metrics[f"scope_eval_harmful_answers{label}"] = int(offline_metrics.get("harmful_answers", 0))
         metrics[f"scope_eval_wrong_card_answers{label}"] = int(offline_metrics.get("wrong_card_answers", 0))
-        ambiguous_answers = int(offline_metrics.get("ambiguous_total", 0)) - int(
-            offline_metrics.get("ambiguous_clarifies", 0))
-        metrics[f"scope_eval_ambiguous_answers{label}"] = ambiguous_answers
+        # The EXPLICIT ambiguous_answers metric (ambiguous case scored ANSWER), no longer
+        # derived as total - clarifies. Fail-safe to 0 for a metric export if absent.
+        metrics[f"scope_eval_ambiguous_answers{label}"] = int(
+            offline_metrics.get("ambiguous_answers", 0) or 0)
     if artifact_id and canary_metrics is not None:
         clabel = f'{{artifact_id="{artifact_id}"}}'
         metrics[f"scope_serving_consistency_failures_total{clabel}"] = int(
@@ -534,7 +551,7 @@ def _write_observability(ctx: _RunContext, *, artifact_id: str | None,
     try:
         observability.render_dashboard(
             registry.observability_dir / "dashboard.html",
-            release=release_view, evidence=list(evidence), alerts=[],
+            release=release_view, evidence=list(evidence), alerts=alerts,
         )
     except Exception:
         pass
@@ -602,6 +619,14 @@ def run_pipeline(
             inputs={
                 "cards_file": sha256_file(config.cards_path),
                 "logs_file": sha256_file(config.logs_path),
+                # A new served turn in the live feedback log must invalidate INGEST (and
+                # thereby MINE/BUILD via the snapshot id). "" when no live path/file exists.
+                "feedback_logs_file": (
+                    sha256_file(config.feedback_logs_path)
+                    if config.feedback_logs_path is not None
+                    and config.feedback_logs_path.is_file()
+                    else ""
+                ),
                 "environment": config.environment,
                 "frozen": {
                     "scope_bot": config.frozen.scope_bot_sha256,
@@ -673,7 +698,7 @@ def run_pipeline(
             ctx.emit("MINE", "circuit_trip", "alert", artifact_id=current_before,
                      error_code="mined_safety_regression",
                      counts={"rolled_back_to": circuit.get("rolled_back_to")})
-            raise PipelineBlocked(ctx.results["MINE"], block_reason)
+            raise PipelineBlocked(block_reason)
 
         # --- REVIEW_QUEUE -------------------------------------------------
         reviews_path = registry.reviews_path

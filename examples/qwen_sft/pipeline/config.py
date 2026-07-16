@@ -18,6 +18,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from pipeline.device_guard import validate_config_gpu
+
 SCHEMA_VERSION = 1
 _ENVIRONMENTS = ("ci", "demo")
 
@@ -75,6 +77,10 @@ class PipelineConfig:
     state_root: Path
     cards_path: Path
     logs_path: Path
+    # Live feedback log that real serving appends to and the DAG ingests alongside the
+    # bootstrap sample. ``None`` (CI) keeps runs hermetic; demo points it at the served
+    # conversations.jsonl so a new served turn feeds the next INGEST/MINE/BUILD + drift.
+    feedback_logs_path: Path | None
     eval_source_path: Path
     frozen: FrozenHashes
     gpu_uuid: str
@@ -164,6 +170,18 @@ def load_config(path: Path, *, state_override: Path | None = None) -> PipelineCo
     eval_source_path = _resolve(
         project_root, _require_str(paths, "eval_source", "config.paths")
     )
+    # Optional live feedback log. Absent or explicit JSON null -> None (hermetic CI). A
+    # declared string is resolved CWD-independently against the project root, exactly like
+    # every other path, so real serving and the DAG agree on one absolute location.
+    if not isinstance(paths, dict):
+        raise ValueError("config: config.paths must be a JSON object")
+    feedback_raw = paths.get("feedback_logs")
+    if feedback_raw is None:
+        feedback_logs_path: Path | None = None
+    elif isinstance(feedback_raw, str) and feedback_raw:
+        feedback_logs_path = _resolve(project_root, feedback_raw)
+    else:
+        raise ValueError("config: config.paths.feedback_logs must be a non-empty string or null")
 
     frozen_raw = _require(data, "frozen", "config")
     frozen = FrozenHashes(
@@ -181,6 +199,9 @@ def load_config(path: Path, *, state_override: Path | None = None) -> PipelineCo
     gpu_raw = _require(data, "gpu", "config")
     gpu_uuid = _require_str(gpu_raw, "uuid", "config.gpu")
     gpu_name = _require_str(gpu_raw, "name", "config.gpu")
+    # The device guard's hard-coded A5000 identity is the real boundary; fail closed here
+    # (before any run) if the config's declared GPU identity has drifted from it.
+    validate_config_gpu(gpu_uuid, gpu_name)
 
     promotion_raw = _require(data, "promotion", "config")
     promotion = PromotionThresholds(
@@ -235,6 +256,7 @@ def load_config(path: Path, *, state_override: Path | None = None) -> PipelineCo
         state_root=state_root,
         cards_path=cards_path,
         logs_path=logs_path,
+        feedback_logs_path=feedback_logs_path,
         eval_source_path=eval_source_path,
         frozen=frozen,
         gpu_uuid=gpu_uuid,

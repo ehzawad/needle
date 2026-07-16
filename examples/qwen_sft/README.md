@@ -29,7 +29,11 @@ bash setup_env.sh          # one-time: pinned inference venv (.venv-qlora)
 
 # serve the promoted model over HTTP (real: guards onto the A5000, closes the feedback loop)
 .venv-qlora/bin/python -m pipeline serve --config pipeline/config.demo.json --state .pipeline-a5000 --http 127.0.0.1:8080 --backend real
-curl -s :8080/respond -d '{"query":"How do I add my card to Apple Pay?"}'
+curl -s :8080/respond -d '{"query":"How do I add my card to Apple Pay?","session_id":"me"}'
+# every served turn (gate-only or respond) logs to the configured feedback log
+# (demo: logs/conversations.jsonl); the next DAG run ingests it alongside the bootstrap
+# sample, so the flywheel closes. Pass session_id to keep a client's turns in one session
+# (one is generated + echoed if omitted).
 ```
 
 ## File map
@@ -41,7 +45,8 @@ curl -s :8080/respond -d '{"query":"How do I add my card to Apple Pay?"}'
 | `seed16/cards.json` | the editable scope/knowledge file (16 cards; 6 carry executable discriminators) |
 | `eval50.py` · `eval50_results.txt` | the frozen 50-scenario dev suite + its committed baseline output |
 | `feedback_log.py` · `mine_signals.py` · `adapter/learn.py` | the feedback loop: log turns → mine weak labels → build the exemplar bank (libraries the pipeline wraps) |
-| `logs/conversations.sample.jsonl` | illustrative traffic + CI/demo pipeline input |
+| `logs/conversations.sample.jsonl` | **bootstrap** traffic (tracked, immutable) — the first-run pipeline input |
+| `logs/conversations.jsonl` | **live** feedback log real serving appends to (git-ignored); demo runs ingest it alongside the bootstrap sample |
 | `pipeline/` | the MLOps automation package (see [`pipeline/PIPELINE.md`](pipeline/PIPELINE.md)) |
 | `setup_env.sh` | pinned inference venv bootstrap |
 

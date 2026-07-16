@@ -176,19 +176,17 @@ def _load_current_evidence(registry: FileRegistry) -> list[dict[str, Any]]:
 
 
 def _drift_alerts(config: Any) -> list:
-    """Compute conservative drift alerts from the served conversation log (older half vs
-    newer half). Returns [] until there are >= drift.min_samples turns in each window —
-    which is the honest behavior at demo volume, but it IS a live caller of detect_drift."""
-    from feedback_log import read_sessions
+    """Conservative drift alerts from the CONFIGURED live feedback log (older half vs
+    newer half), via the shared observability loader — the SAME loader the DAG uses, so
+    the CLI dashboard and the DAG-rendered dashboard show identical alerts. Returns [] when
+    no live log is configured (CI) or there are < drift.min_samples turns per window."""
+    from pipeline.observability import load_drift_alerts
 
-    from pipeline.observability import detect_drift
-    turns = [t for session in read_sessions().values() for t in session if t.get("disposition")]
-    turns.sort(key=lambda t: t.get("ts", ""))
-    mid = len(turns) // 2
-    return list(detect_drift(
-        turns[:mid], turns[mid:],
+    return load_drift_alerts(
+        config.feedback_logs_path,
         min_samples=config.drift.min_samples,
-        max_rate_delta=config.drift.max_disposition_rate_delta))
+        max_rate_delta=config.drift.max_disposition_rate_delta,
+    )
 
 
 def _cmd_dashboard(args: argparse.Namespace) -> int:
@@ -223,16 +221,20 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     cards = json.loads(cards_path.read_text("utf-8"))
     backend = getattr(args, "backend", "mock")
 
+    device: Any = None
     if backend == "real":
         # A leaf model-serving process (like gpu_worker): guard the A5000 IN THIS process
         # BEFORE any torch import, then load the promoted candidate's real bot and serve it.
-        import os
         from pipeline.device_guard import (
-            assert_model_devices, child_preflight, pinned_environment,
+            assert_model_devices, child_preflight, pin_current_process,
         )
-        pinned = pinned_environment()
-        os.environ.update({k: pinned[k] for k in
-                           ("CUDA_DEVICE_ORDER", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES")})
+        if config.feedback_logs_path is None:
+            print("serve: real backend requires paths.feedback_logs to be configured "
+                  "(the live conversation log served turns are appended to)", file=sys.stderr)
+            return 1
+        # Pin THIS process to the A5000 (overwrite CUDA vars + strip RANK/LOCAL_RANK/etc.)
+        # BEFORE any torch import, then re-verify fail-closed.
+        pin_current_process()
         device = child_preflight()  # fail closed unless exactly the A5000 is visible
         from feedback_log import TurnLogger
         from pipeline.adapters import load_real_bot, real_gate, real_respond
@@ -240,9 +242,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         assert_model_devices(getattr(bot, "m", bot))
         gate = real_gate(bot, cards)
         respond = real_respond(bot)
-        # Real serving closes the feedback loop: turns land in logs/conversations.jsonl,
-        # which mine_signals/adapter.learn later turn into the next candidate's exemplars.
-        turn_logger: object = TurnLogger()
+        # Real serving closes the feedback loop: turns land in the CONFIGURED live feedback
+        # log, which the next DAG ingests + mines into the next candidate's exemplars.
+        turn_logger: object = TurnLogger(path=config.feedback_logs_path, kb_path=config.cards_path)
         backend_label = f"real, {device.name}"
     else:
         cases = load_eval50_cases(config.eval_source_path)
@@ -252,16 +254,31 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         backend_label = "mock"
 
     event_path = registry.observability_dir / "events.jsonl"
+    # One shared recorder gives /gate and /respond per-session, monotonic turns and logs
+    # each served turn exactly once (no second HTTP-layer log).
+    recorder = serving.TurnRecorder(
+        turn_logger=turn_logger, event_path=event_path,
+        artifact_id=artifact_id, default_session=f"serve-{artifact_id}")
     serve = serving.make_server(
         artifact_id=artifact_id, cards=cards, gate=gate, respond=respond,
-        turn_logger=turn_logger, event_path=event_path)
+        turn_logger=turn_logger, event_path=event_path, recorder=recorder)
+    logged_gate = serving.make_logged_gate(gate, recorder)
+
+    def _device_report() -> dict[str, Any] | None:
+        if device is None:
+            return None
+        return {"uuid": device.uuid, "name": device.name,
+                "logical_index": device.logical_index,
+                "visible_count": device.visible_count,
+                "torch_version": device.torch_version}
 
     def _healthz() -> dict[str, Any]:
         return {"ok": True, "artifact_id": artifact_id, "channel": "CURRENT",
-                "circuit_open": dag._circuit_open(registry), "backend": backend}
+                "circuit_open": dag._circuit_open(registry), "backend": backend,
+                "device": _device_report()}
 
     host, port = parse_host_port(args.http)
-    server = build_http_server(host, port, serve=serve, gate=gate,
+    server = build_http_server(host, port, serve=serve, gate=logged_gate, recorder=recorder,
                                artifact_id=artifact_id, healthz=_healthz)
     print(f"serving CURRENT {artifact_id} on http://{host}:{port} "
           f"({backend_label} ServeFn; Ctrl-C to stop)", file=sys.stderr)

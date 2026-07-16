@@ -64,9 +64,12 @@ their analogs.
 
 ## Safety invariants (the 0-leak property is preserved by construction)
 
-- The control plane **never** imports torch; the frozen bot/policy/eval files are never
-  edited (CI checks `git diff` is empty) — the automation *wraps*, never forks.
-- Ingest fails closed if any frozen source hash changes. Cards may change → new candidate.
+- The control plane **never** imports torch; the automation *wraps* the bot/policy/eval,
+  never forks them. Those three files are **hash-pinned** in both configs: editing one is
+  allowed but requires a deliberate re-freeze (update both config SHA-256s in lockstep) and
+  a fresh A5000 re-certification — `test_source_freeze` enforces the pin.
+- Ingest fails closed if any frozen source hash no longer matches the pinned value. Cards
+  may change freely → they produce a new candidate.
 - Promotion floor is the **exact** measured result: `harmful=0, right_card≥20,
   wrong_card=0, ambiguous_clarify≥5, errors=0`. Zero-leak alone is insufficient (that
   would reward abstain-everything).

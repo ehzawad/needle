@@ -25,6 +25,7 @@ __all__ = [
     "emit_event",
     "write_prometheus_text",
     "detect_drift",
+    "load_drift_alerts",
     "render_dashboard",
 ]
 
@@ -227,6 +228,40 @@ def detect_drift(
             )
 
     return tuple(alerts)
+
+
+def load_drift_alerts(
+    log_path: Path | str | None,
+    *,
+    min_samples: int,
+    max_rate_delta: float,
+) -> list[Mapping[str, Any]]:
+    """Load conservative drift alerts from the configured live feedback log.
+
+    The SINGLE drift loader shared by the CLI ``dashboard`` command and the DAG's
+    observability writer, so both render identical alerts from the same CONFIGURED path
+    (never ``feedback_log.read_sessions``'s CWD-relative default). Reads the served turns,
+    splits them older-half vs newer-half by timestamp, and delegates to
+    :func:`detect_drift`. Returns ``[]`` when no path is configured or there are fewer
+    than ``min_samples`` classifiable turns per window — the honest behavior at demo
+    volume. Drift is informational only; it never gates promotion.
+    """
+    if not log_path:
+        return []
+    from feedback_log import read_sessions
+
+    sessions = read_sessions(Path(log_path))
+    turns = [t for session in sessions.values() for t in session if t.get("disposition")]
+    turns.sort(key=lambda t: t.get("ts", ""))
+    mid = len(turns) // 2
+    return list(
+        detect_drift(
+            turns[:mid],
+            turns[mid:],
+            min_samples=min_samples,
+            max_rate_delta=max_rate_delta,
+        )
+    )
 
 
 def _esc(value: Any) -> str:

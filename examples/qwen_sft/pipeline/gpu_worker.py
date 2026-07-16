@@ -1,4 +1,9 @@
-"""The private, GPU-guarded real-backend worker — the ONLY module that loads the model.
+"""The private, GPU-guarded real-backend worker that loads the model for DAG evidence.
+
+This is the model-loading process for the DAG's real backend (offline + shadow + canary).
+It is not the only place a model is ever loaded: the real HTTP ``serve`` path
+(``cli._cmd_serve``) also loads the promoted candidate in-process, after pinning the A5000
+in the current process and re-running ``child_preflight``. Both paths obey the same guard.
 
 Real-world analog: a Kubernetes GPU pod scheduled by the NVIDIA device plugin — an
 isolated job that sees exactly the GPUs it was granted and does the heavy, device-bound

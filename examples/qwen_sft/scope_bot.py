@@ -101,15 +101,15 @@ class ScopeBot:
             attn_implementation="sdpa", device_map={"": 0}).eval()
 
     def _load_exemplars(self, path, kb):
-        """Load the exemplar bank, but ONLY if it was built against the current
-        scope file — a stale bank (cards edited since) is quarantined, never used."""
+        """Load exemplars only when the bank's kb_version exactly matches the current
+        scope file; missing, null, or stale versions are quarantined."""
         p = Path(path)
         if not p.exists():
             return []
         import hashlib
         cur = hashlib.sha1(Path(kb).read_bytes()).hexdigest()[:12]
         data = json.loads(p.read_text())
-        if data.get("kb_version") not in (cur, None):
+        if data.get("kb_version") != cur:
             print(f"[scope_bot] exemplar bank kb_version={data.get('kb_version')} != current {cur}; quarantined.")
             return []
         return data.get("exemplars", [])
@@ -141,7 +141,11 @@ class ScopeBot:
         return enforce_policy(query, proposed, self.by_id)
 
     def respond(self, query):
-        g = self.gate(query)
+        # Always gate first — the fail-closed public contract. Interactive mode reuses
+        # its already-computed gate result via _respond_from_gate to avoid a 2nd judge call.
+        return self._respond_from_gate(query, self.gate(query))
+
+    def _respond_from_gate(self, query, g):
         if g["disposition"] == "ANSWER" and g["card_id"] in self.by_id:
             facts = "\n".join(f"- {f}" for f in self.by_id[g["card_id"]].get("key_facts", []))
             reply = self._chat(GEN_SYS, f"APPROVED FACTS ({g['card_id']}):\n{facts}\n\nUSER QUESTION: {query}", max_new=200)
@@ -151,7 +155,7 @@ class ScopeBot:
             # policy flagged a specific unresolved discriminator.
             if g.get("clarifying_question"):
                 return {"disposition": "CLARIFY", "reply": g["clarifying_question"], "reason": g["reason"]}
-            cands = [c for c in g["candidates"] if c in self.by_id][:3] or list(self.by_id)[:0]
+            cands = [c for c in g["candidates"] if c in self.by_id][:3]
             opts = " or ".join(self.by_id[c]["supported_goal"].rstrip(".").lower() for c in cands) if cands else "which topic you mean"
             return {"disposition": "CLARIFY", "reply": f"Just to make sure — do you mean {opts}?", "reason": g["reason"]}
         return {"disposition": "ABSTAIN", "reply": REFUSAL, "reason": g["reason"]}
@@ -184,7 +188,7 @@ def main():
             if not q:
                 continue
             g = bot.gate(q)
-            r = bot.respond(q)
+            r = bot._respond_from_gate(q, g)
             print(f"  gate: {g['disposition']} card={g['card_id']}  reason: {g['reason']}")
             print(f"  bot : {r['reply']}\n")
         return

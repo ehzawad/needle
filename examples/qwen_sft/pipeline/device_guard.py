@@ -42,6 +42,44 @@ def pinned_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def pin_current_process() -> dict[str, str]:
+    """Pin THIS process to the A5000 in-place, for a model that will be loaded in the
+    CURRENT process (real HTTP serving) rather than a launched child.
+
+    Applies :func:`pinned_environment` to ``os.environ`` — overwriting the CUDA
+    visibility vars AND removing every distributed-launch var in ``_STRIP`` — so a
+    subsequent ``child_preflight()`` and in-process torch import see exactly the A5000.
+    Must run BEFORE any torch import. Returns the sanitized environment for reference.
+    """
+    pinned = pinned_environment(os.environ)
+    os.environ["CUDA_DEVICE_ORDER"] = pinned["CUDA_DEVICE_ORDER"]
+    os.environ["CUDA_VISIBLE_DEVICES"] = pinned["CUDA_VISIBLE_DEVICES"]
+    os.environ["NVIDIA_VISIBLE_DEVICES"] = pinned["NVIDIA_VISIBLE_DEVICES"]
+    for k in _STRIP:
+        os.environ.pop(k, None)
+    return pinned
+
+
+def validate_config_gpu(gpu_uuid: object, gpu_name: object) -> None:
+    """Assert the config-declared GPU identity is EXACTLY the guarded A5000.
+
+    The device guard's hard-coded ``A5000_UUID`` / ``A5000_NAME`` are the real security
+    boundary; this makes the config a checked, auditable copy of that desired state so
+    the two can never silently drift. Called from ``load_config`` before any run; a
+    mismatch raises :class:`ValueError` (fail closed before the pipeline starts).
+    """
+    if gpu_uuid != A5000_UUID:
+        raise ValueError(
+            f"config gpu.uuid {gpu_uuid!r} does not match the guarded A5000 "
+            f"UUID {A5000_UUID!r}"
+        )
+    if gpu_name != A5000_NAME:
+        raise ValueError(
+            f"config gpu.name {gpu_name!r} does not match the guarded A5000 "
+            f"name {A5000_NAME!r}"
+        )
+
+
 def _smi_uuids() -> list[tuple[str, str]]:
     """(uuid, name) for every physical GPU, via nvidia-smi (no torch, control-plane safe)."""
     out = subprocess.run(

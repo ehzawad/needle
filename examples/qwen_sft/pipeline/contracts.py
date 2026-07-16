@@ -76,6 +76,7 @@ class EvalReport:
     in_scope_total: int
     wrong_card_answers: int
     ambiguous_clarifies: int
+    ambiguous_answers: int
     ambiguous_total: int
     errors: int
     predictions: tuple[Mapping[str, Any], ...]

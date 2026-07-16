@@ -26,8 +26,9 @@ serving-local structural assertion plus the circuit-breaker read.
 from __future__ import annotations
 
 import json
+import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,8 @@ __all__ = [
     "CONSISTENCY_ALERT_ACTION",
     "CIRCUIT_OPEN_ACTION",
     "SAFE_REFUSAL",
+    "TurnRecorder",
+    "make_logged_gate",
     "make_server",
 ]
 
@@ -106,6 +109,108 @@ def _circuit_blocks(
     return (_norm_id(bad) == _norm_id(artifact_id)), data
 
 
+class TurnRecorder:
+    """Thread-safe per-session turn counter + single logging point for a served turn.
+
+    One recorder is shared by ``/gate`` and ``/respond`` so their turns interleave into
+    ONE monotonically increasing sequence per session, and every served turn (gate-only
+    or full respond) is persisted exactly once through the same injected ``TurnLogger``.
+    Anonymous HTTP requests each get their own session id at the HTTP boundary; they are
+    never merged into one global session here. Safe under ``ThreadingHTTPServer``: the
+    counter map is mutated only under a lock.
+    """
+
+    def __init__(self, *, turn_logger: object, event_path: Path, artifact_id: str,
+                 default_session: str) -> None:
+        self._lock = threading.Lock()
+        self._turns: dict[str, int] = {}
+        self.turn_logger = turn_logger
+        self.event_path = Path(event_path)
+        self.artifact_id = artifact_id
+        self.default_session = default_session
+
+    def next_turn(self, session_id: str) -> int:
+        """Return the next monotonic turn number for ``session_id`` (thread-safe)."""
+        with self._lock:
+            n = self._turns.get(session_id, 0) + 1
+            self._turns[session_id] = n
+            return n
+
+    def record(self, *, session_id: str, turn: int, query: str,
+               gate_view: Mapping[str, Any], reply: str, latency_ms: int,
+               policy_action: str | None, endpoint: str, event: str, status: str,
+               error_code: str | None) -> None:
+        """Persist one served turn (log + observability event). Never raises: telemetry
+        must not break serving."""
+        extra = {
+            "artifact_id": self.artifact_id,
+            "release_channel": _DEFAULT_CHANNEL,
+            "latency_ms": latency_ms,
+            "policy_action": policy_action,
+            "endpoint": endpoint,
+        }
+        try:  # logging must never break serving.
+            self.turn_logger.log(  # type: ignore[attr-defined]
+                session_id, turn, query, dict(gate_view), reply, extra=extra)
+        except Exception:
+            pass
+        try:
+            emit_event(
+                self.event_path,
+                {
+                    "stage": "serving",
+                    "event": event,
+                    "status": status,
+                    "artifact_id": self.artifact_id,
+                    "duration_ms": latency_ms,
+                    "counts": {"disposition": gate_view.get("disposition"),
+                               "endpoint": endpoint},
+                    "error_code": error_code,
+                },
+            )
+        except Exception:
+            pass
+
+
+def make_logged_gate(gate: GateFn, recorder: TurnRecorder) -> Callable[..., Any]:
+    """Wrap a policy-wrapped gate so ``/gate`` logs exactly one gate-only record.
+
+    Calls the model gate EXACTLY once (never ``respond`` — ``/gate`` must not generate),
+    persists the full disposition/card/candidates/reason with an empty reply, the artifact
+    id, CURRENT channel, latency, policy_action, and ``endpoint="gate"`` through the shared
+    recorder, and emits a ``gate_served`` event. Returns the raw gate decision unchanged.
+    """
+    def logged_gate(query: str, session_id: str | None = None,
+                    turn: int | None = None) -> Any:
+        sid = session_id or recorder.default_session
+        t = turn if turn is not None else recorder.next_turn(sid)
+        t0 = time.monotonic()
+        decision = gate(query)  # the ONE model gate call; no generation
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        if isinstance(decision, Mapping):
+            reason = decision.get("reason", "")
+            raw_candidates = decision.get("candidates") or []
+            gate_view = {
+                "disposition": decision.get("disposition"),
+                "card_id": decision.get("card_id"),
+                "candidates": list(raw_candidates) if isinstance(raw_candidates, (list, tuple)) else [],
+                "reason": reason if isinstance(reason, str) else str(reason),
+            }
+            raw_action = decision.get("policy_action")
+            policy_action = raw_action if isinstance(raw_action, str) and raw_action else None
+        else:
+            gate_view = {"disposition": None, "card_id": None, "candidates": [], "reason": ""}
+            policy_action = None
+        recorder.record(
+            session_id=sid, turn=t, query=query, gate_view=gate_view, reply="",
+            latency_ms=latency_ms, policy_action=policy_action, endpoint="gate",
+            event="gate_served", status="ok", error_code=None,
+        )
+        return decision
+
+    return logged_gate
+
+
 def make_server(
     *,
     artifact_id: str,
@@ -114,11 +219,16 @@ def make_server(
     respond: RespondFn,
     turn_logger: object,
     event_path: Path,
+    recorder: TurnRecorder | None = None,
 ) -> ServeFn:
     """Build the serving function for a verified candidate.
 
-    The returned ``ServeFn`` takes a single query and returns a :class:`TurnResult`,
-    running the frozen 7-step algorithm on every call and logging each turn.
+    The returned ``ServeFn`` takes a query (and, from the HTTP layer, an optional
+    ``session_id`` / ``turn``) and returns a :class:`TurnResult`, running the frozen
+    7-step algorithm on every call and logging each turn EXACTLY once through the shared
+    :class:`TurnRecorder`. When no recorder is injected (canary / direct callers) it owns
+    a private recorder keyed on a single default session, preserving the single-arg
+    ``serve(query)`` contract.
     """
     # Step 1 (construction-time integrity): a candidate with no usable cards cannot
     # validate any answer, so its answers would always fail closed anyway. Refuse to
@@ -133,8 +243,12 @@ def make_server(
         )
 
     event_path = Path(event_path)
-    session_id = f"serve-{artifact_id}"
-    state = {"turn": 0}
+    default_session = f"serve-{artifact_id}"
+    if recorder is None:
+        recorder = TurnRecorder(
+            turn_logger=turn_logger, event_path=event_path,
+            artifact_id=artifact_id, default_session=default_session,
+        )
 
     def _safe_nonanswer(*, reason: str, policy_action: str) -> TurnResult:
         return TurnResult(
@@ -148,6 +262,7 @@ def make_server(
 
     def _finish(
         query: str,
+        session_id: str,
         turn: int,
         result: TurnResult,
         t0: float,
@@ -163,35 +278,17 @@ def make_server(
             "candidates": [],
             "reason": result.reason,
         }
-        extra = {
-            "artifact_id": artifact_id,
-            "release_channel": _DEFAULT_CHANNEL,
-            "latency_ms": latency_ms,
-            "policy_action": result.policy_action,
-        }
-        try:  # logging must never break serving.
-            turn_logger.log(session_id, turn, query, gate_view, result.reply, extra=extra)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        try:
-            emit_event(
-                event_path,
-                {
-                    "stage": "serving",
-                    "event": event,
-                    "status": status,
-                    "artifact_id": artifact_id,
-                    "duration_ms": latency_ms,
-                    "counts": {"disposition": result.disposition},
-                    "error_code": error_code,
-                },
-            )
-        except Exception:
-            pass
+        recorder.record(
+            session_id=session_id, turn=turn, query=query, gate_view=gate_view,
+            reply=result.reply, latency_ms=latency_ms,
+            policy_action=result.policy_action, endpoint="respond",
+            event=event, status=status, error_code=error_code,
+        )
 
-    def serve(query: str) -> TurnResult:
-        state["turn"] += 1
-        turn = state["turn"]
+    def serve(query: str, session_id: str | None = None,
+              turn: int | None = None) -> TurnResult:
+        sid = session_id or recorder.default_session
+        turn = turn if turn is not None else recorder.next_turn(sid)
         t0 = time.monotonic()
 
         # Step 1: circuit breaker + integrity — fail closed when open against THIS artifact.
@@ -202,7 +299,7 @@ def make_server(
                 policy_action=CIRCUIT_OPEN_ACTION,
             )
             _finish(
-                query, turn, result, t0,
+                query, sid, turn, result, t0,
                 status="alert", event="circuit_open", error_code="circuit_open",
             )
             return result
@@ -233,7 +330,7 @@ def make_server(
                 policy_action=CONSISTENCY_ALERT_ACTION,
             )
             _finish(
-                query, turn, result, t0,
+                query, sid, turn, result, t0,
                 status="alert", event="serving_consistency_alert",
                 error_code="gate_error",
             )
@@ -265,7 +362,7 @@ def make_server(
                 policy_action=CONSISTENCY_ALERT_ACTION,
             )
             _finish(
-                query, turn, result, t0,
+                query, sid, turn, result, t0,
                 status="alert", event="serving_consistency_alert",
                 error_code="respond_error",
             )
@@ -288,7 +385,7 @@ def make_server(
                 policy_action=g_action or "answer",
             )
             _finish(
-                query, turn, result, t0,
+                query, sid, turn, result, t0,
                 status="ok", event="served", error_code=None,
             )
             return result
@@ -308,7 +405,7 @@ def make_server(
                 policy_action=g_action or g_disp.lower(),
             )
             _finish(
-                query, turn, result, t0,
+                query, sid, turn, result, t0,
                 status="ok", event="served", error_code=None,
             )
             return result
@@ -323,7 +420,7 @@ def make_server(
             policy_action=CONSISTENCY_ALERT_ACTION,
         )
         _finish(
-            query, turn, result, t0,
+            query, sid, turn, result, t0,
             status="alert", event="serving_consistency_alert",
             error_code="consistency_mismatch",
         )
